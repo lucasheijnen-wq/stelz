@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   matchEvent, eventWindow, inWindow, eventStatus, rosterAccounts, identityMap,
-  nameMap, orderedTags, formatWindow, type Attributable,
+  nameMap, orderedTags, formatWindow, bookingFor, type Attributable,
 } from './events'
 import { EVENTS, getEvent, type StelzEvent } from '../data/events'
 
@@ -216,5 +216,32 @@ describe('foundVia, the tag the harvest actually searched', () => {
 
   it('falls back to the caption when nothing was recorded', () => {
     expect(matchEvent(LL, item({ hashtags: ['lowlands'] }))?.foundVia).toBe('lowlands')
+  })
+})
+
+describe('bookingFor', () => {
+  it('finds a booked creator by either platform', () => {
+    // Het roster boekt een PERSOON. Rein heet @rvdofficial op Instagram en
+    // @rinnavandoffoe op TikTok; beide moeten dezelfde boeking opleveren.
+    const withTikTok = LL.roster.find((m) => m.tiktok)!
+    expect(bookingFor(withTikTok.instagram)?.member.name).toBe(withTikTok.name)
+    expect(bookingFor(withTikTok.tiktok as string)?.member.name).toBe(withTikTok.name)
+  })
+
+  it('ignores case and a leading @', () => {
+    const m = LL.roster[0]
+    expect(bookingFor(`@${m.instagram.toUpperCase()}`)?.member.name).toBe(m.name)
+  })
+
+  it('returns null for someone nobody booked', () => {
+    // De helft van het punt: zonder dit onderscheid leest "geen detecties voor
+    // @davidscholten" hetzelfde als "@davidscholten plaatste niets", en dat is
+    // het verschil tussen een gat in de tool en de bevinding zelf.
+    expect(bookingFor('een-vreemde-van-het-internet')).toBeNull()
+    expect(bookingFor('')).toBeNull()
+  })
+
+  it('names the event, so the page can say which one', () => {
+    expect(bookingFor(LL.roster[0].instagram)?.event.id).toBe(LL.id)
   })
 })

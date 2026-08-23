@@ -123,17 +123,51 @@ describe.skipIf(!present)('the roster / discovery split in the real fixture', ()
     }
   })
 
-  it('never counts the same post as both paid and organic', () => {
-    // 73_lowlands_discovery.py drops anything a roster handle posted, whichever
+  it('never counts a booked account as organic pickup', () => {
+    // 73_lowlands_discovery.py drops anything a BOOKED handle posted, whichever
     // hashtag surfaced it. If that check breaks, bought content starts being
     // reported as organic pickup — the single most flattering error this page
     // could make.
-    const rosterAccounts = new Set(
-      rows.filter((r) => r.source === 'roster')
-        .map((r) => (r.platformHandle ?? r.creatorHandle).toLowerCase()))
+    //
+    // Measured against the event definition, NOT against "every account that
+    // appears on a roster row". Those are different sets, and the difference is
+    // collab posts: Instagram publishes a collaboration on both authors'
+    // profiles, so @stanlucas.m turns up as the platformHandle of a post
+    // credited to @joshbram_ without ever having been booked. His own TikTok,
+    // found via #lowlands, is genuinely organic — and an earlier version of
+    // this test called that a violation.
+    const booked = new Set<string>()
+    for (const m of (getEvent('lowlands-2026') as StelzEvent).roster) {
+      if (m.instagram) booked.add(m.instagram.toLowerCase())
+      if (m.tiktok) booked.add(m.tiktok.toLowerCase())
+    }
     for (const r of rows.filter((r) => r.source === 'discovery')) {
       const acct = (r.platformHandle ?? r.creatorHandle).toLowerCase()
-      expect(rosterAccounts.has(acct), `${acct} is on the roster and in discovery`).toBe(false)
+      expect(booked.has(acct), `${acct} is booked and yet counted as organic`).toBe(false)
+      expect(booked.has((r.creatorHandle ?? '').toLowerCase()),
+        `${r.creatorHandle} is booked and yet counted as organic`).toBe(false)
+    }
+  })
+
+  it('never puts one post on both sides of the split', () => {
+    // The stricter half of the same worry, and the one that actually inflates a
+    // number: a single post counted once as delivered and once as organic.
+    // A co-author appearing in both sets is fine; a post doing so is not.
+    const byId = new Map<string, string>()
+    for (const r of rows) {
+      const seen = byId.get(r.itemId)
+      expect(seen === undefined || seen === r.source,
+        `${r.itemId} is both ${seen} and ${r.source}`).toBe(true)
+      byId.set(r.itemId, r.source)
+    }
+    const postSides = new Map<string, Set<string>>()
+    for (const r of rows) {
+      const set = postSides.get(r.postKey) ?? new Set<string>()
+      set.add(r.source)
+      postSides.set(r.postKey, set)
+    }
+    for (const [key, sides] of postSides) {
+      expect([...sides], `${key} spans both sources`).toHaveLength(1)
     }
   })
 

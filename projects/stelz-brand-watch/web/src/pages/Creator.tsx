@@ -1,6 +1,16 @@
-// Creator profile — built entirely from real detections. Shows who they are
-// (avatar, bio, platform, followers) and every piece of content where the
-// brand was found, deduped to one card per post.
+// Eén creator: wie het is, en elk stuk content waar Stëlz in beeld kwam.
+//
+// TWEE BRONNEN, ÉÉN PAGINA. De pagina las alleen Firestore, en de Cloud
+// Functions staan niet uitgerold — dus elke link vanuit de creatortabel kwam
+// uit op "geen detecties", ook voor iemand met vier posts. Er is nu een tweede
+// tak die de evenement-fixture leest.
+//
+// DIE TAK REKENT NIETS ZELF UIT. Hij haalt joinCampaign en campaignRollup aan,
+// precies zoals de evenementpagina, zodat het getal in deze kop en het getal in
+// haar rij van de creatortabel niet uit elkaar kunnen lopen. Dat was ook geen
+// vrije keuze: de detectierijen dragen géén cijfers — 0 van 2693 heeft een
+// like- of weergavetelling — want die zitten allemaal aan de item-kant. Wie
+// hier op DetectionRow.likes_count optelt, krijgt gegarandeerd nul.
 
 import { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
@@ -11,21 +21,37 @@ import { MediaTile } from '../components/MediaTile'
 import { imageUrlFor, dedupeByPost, parentPostKey, type DetectionRow, type ResonanceRow } from '../lib/types'
 import { fetchDetections, fetchResonanceForCreator, fetchCreatorProfile } from '../lib/data'
 import { DetectionDrawer } from '../components/DetectionDrawer'
+import { StoryDetail } from '../components/StoryDetail'
+import { ContentCard } from '../components/campaign/ContentCard'
 import { srsLayers, srsMode, srsHeadline, MODE_BLURB } from '../lib/srs'
 import { sceneBreakdown } from '../lib/scenes'
 import { ReadOnlyNotice } from '../lib/membership'
+import { useCampaignPreview, useCampaignDetectionsPreview } from '../lib/devPreview'
+import {
+  joinCampaign, campaignRollup, SURFACE_LABEL, SURFACES,
+  type CampaignRow,
+} from '../lib/campaign'
+import { followerIndex, hitTotals, stelzHits } from '../lib/hits'
+import { bookingFor, formatWindow, matchEvent } from '../lib/events'
+import { EVENTS } from '../data/events'
+import { compactNum, fmtDate, fmtNum } from '../lib/format'
 
 export default function Creator() {
   const { handle = '' } = useParams()
+  const h = handle.toLowerCase()
   const [rows, setRows] = useState<DetectionRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [active, setActive] = useState<DetectionRow | null>(null)
+  const [openRow, setOpenRow] = useState<CampaignRow | null>(null)
   const [resonance, setResonance] = useState<ResonanceRow | null>(null)
-  // The creator record: the only current source of an Instagram follower
-  // count, bio and avatar. Detections froze whatever was known at detect time,
-  // and the resonance doc is only as fresh as the last SRS run.
+  // Het creator-record: de enige actuele bron van een Instagram-volgersaantal,
+  // bio en avatar. Detecties bevroren wat bekend was tijdens de detectie, en
+  // het resonantie-doc is zo vers als de laatste SRS-run.
   const [profileRecord, setProfileRecord] = useState<{ followerCount: number | null; bio: string | null; avatarUrl: string | null; fullName: string | null } | null>(null)
+
+  const previewItems = useCampaignPreview()
+  const previewDetections = useCampaignDetectionsPreview()
 
   useEffect(() => {
     if (!handle) return
@@ -37,9 +63,9 @@ export default function Creator() {
     return () => { cancelled = true }
   }, [handle])
 
-  // Resonance is a separate, optional read: a creator with detections but no
-  // SRS doc is normal (scoring runs as its own step), so a failure here must
-  // not take the page down with it.
+  // Resonantie is een aparte, optionele read: een creator mét detecties en
+  // zónder SRS-doc is normaal (scoren is een eigen stap), dus een fout hier mag
+  // de pagina niet meenemen in zijn val.
   useEffect(() => {
     if (!handle) return
     let cancelled = false
@@ -54,35 +80,91 @@ export default function Creator() {
     return () => { cancelled = true }
   }, [handle])
 
-  // Detections carry a follower count only when the scrape happened to return
-  // one — Instagram's hashtag endpoint does not. The resonance doc is built
-  // from the creator record, which is populated by the profile scrape, so it
-  // often has the number when the detections don't. Prefer whichever we have.
-  const followersFromPosts = useMemo(
-    () => rows.reduce((mx, r) => Math.max(mx, r.follower_count ?? 0), 0),
-    [rows],
+  // Staat deze persoon op een roster? Zo ja, dan is "plaatste niets" een
+  // bevinding met een naam eraan, in plaats van een lege pagina.
+  const booking = useMemo(() => bookingFor(h), [h])
+
+  // Alles wat deze persoon binnen een evenement plaatste. Op creatorHandle én
+  // platformHandle, want bij een samenwerkingspost is de tweede het account van
+  // de co-auteur en de eerste de geboekte creator — beide moeten hier uitkomen.
+  const mine = useMemo(() => {
+    if (!previewItems || !previewDetections) return [] as CampaignRow[]
+    return joinCampaign(previewItems, previewDetections).filter((r) =>
+      (r.creatorHandle ?? '').toLowerCase() === h
+      || (r.platformHandle ?? '').toLowerCase() === h
+      || (r.scrapedFor ?? '').toLowerCase() === h)
+  }, [previewItems, previewDetections, h])
+
+  // GESCHAALD OP HET EVENEMENT, door dezelfde matchEvent als de evenementpagina.
+  // Zonder dit telde deze pagina ook wat er in juli stond: @lizebooij kwam hier
+  // op 19 beelden uit tegen 6 in haar rij van de creatortabel, en twee schermen
+  // die hetzelfde zouden moeten zeggen en dat niet doen zijn erger dan één
+  // scherm dat er niet is. Wie nergens geboekt is, wordt tegen alle evenementen
+  // gelegd — anders zou een los gevonden account leeg blijven.
+  const eventRows = useMemo(() => {
+    const events = booking ? [booking.event] : EVENTS
+    const out: CampaignRow[] = []
+    for (const r of mine) {
+      for (const ev of events) {
+        const m = matchEvent(ev, r)
+        if (m) { out.push({ ...r, source: m.source, foundVia: r.foundVia ?? m.foundVia }); break }
+      }
+    }
+    return out
+  }, [mine, booking])
+
+  // Wat er buiten elk evenementvenster viel. Niet stilzwijgend weggelaten: het
+  // is echte content van deze persoon, alleen niet van deze campagne.
+  const outsideHits = useMemo(
+    () => stelzHits(mine).length - stelzHits(eventRows).length,
+    [mine, eventRows],
   )
-  const followers = Math.max(
-    followersFromPosts,
-    resonance?.follower_count ?? 0,
-    profileRecord?.followerCount ?? 0,
-  )
+
+  const fromEvent = eventRows.length > 0
+  const eventHits = useMemo(() => stelzHits(eventRows), [eventRows])
+  // Volgersaantallen uit ALLE rijen van deze persoon, niet alleen uit de
+  // treffers — zie followerIndex. Een volgersaantal hangt niet af van welke
+  // post je toevallig bekijkt.
+  const totals = useMemo(
+    () => hitTotals(eventHits, followerIndex(mine)), [eventHits, mine])
+  const eventRollup = useMemo(() => campaignRollup(eventRows), [eventRows])
 
   const posts = useMemo(
     () => dedupeByPost(rows).filter((d) => d.detected === true && d.is_false_positive !== true),
     [rows],
   )
 
+  // Detecties dragen een volgersaantal alleen als de scrape er toevallig een
+  // teruggaf — Instagrams hashtag-endpoint doet dat niet. Neem wat we hebben.
+  const followersFromPosts = useMemo(
+    () => rows.reduce((mx, r) => Math.max(mx, r.follower_count ?? 0), 0),
+    [rows],
+  )
+  const fromProfile = Math.max(
+    followersFromPosts,
+    resonance?.follower_count ?? 0,
+    profileRecord?.followerCount ?? 0,
+  )
+  const followers = Math.max(fromProfile, totals.tiktokFollowers)
+  // Zegt WELK publiek dit is. In de evenement-tak komt elk volgersaantal van
+  // TikTok — Instagram geeft er in deze scrape geen enkele — en @lizebooij
+  // "5.436 volgers" noemen terwijl dat haar TikTok-account @booijagency is,
+  // is een precies verkeerd getal onder een precies verkeerd woord.
+  const followersNote = followers === 0 ? null
+    : fromProfile >= followers ? 'volgers' : 'TikTok-volgers'
+
   const profile = useMemo(() => {
     const withAuthor = rows.find((r) => r.extras?.author)
     const author = withAuthor?.extras?.author ?? null
-    const platform = rows[0]?.platform ?? 'instagram'
-    const totalLikes = posts.reduce((s, r) => s + (r.likes_count ?? 0), 0)
-    const totalViews = posts.reduce((s, r) => s + (r.views_count ?? 0), 0)
+    const platform = eventRows[0]?.platform ?? rows[0]?.platform ?? 'instagram'
     const avgConf = posts.length ? posts.reduce((s, r) => s + (r.confidence ?? 0), 0) / posts.length : 0
     const dates = posts.map((p) => p.posted_at).filter(Boolean).sort() as string[]
     const products = new Map<string, number>()
     for (const p of posts) if (p.product_line) products.set(p.product_line, (products.get(p.product_line) ?? 0) + 1)
+    for (const r of eventHits) {
+      const pl = r.detection?.product_line
+      if (pl) products.set(pl, (products.get(pl) ?? 0) + 1)
+    }
     const externalUrl = author?.profileUrl
       || (platform === 'tiktok' ? `https://www.tiktok.com/@${handle}` : `https://www.instagram.com/${handle}/`)
     return {
@@ -90,8 +172,6 @@ export default function Creator() {
       avatar: author?.avatar ?? null,
       bio: author?.signature ?? null,
       verifiedAccount: author?.verified ?? false,
-      totalLikes,
-      totalViews,
       avgConf,
       firstSeen: dates[0] ?? null,
       lastSeen: dates[dates.length - 1] ?? null,
@@ -100,92 +180,194 @@ export default function Creator() {
       videoCount: posts.filter((p) => p.frame_idx != null).length,
       imageCount: posts.filter((p) => p.frame_idx == null).length,
     }
-  }, [rows, posts, handle])
+  }, [rows, posts, eventRows, eventHits, handle])
+
+  const nothingAnywhere = !loading && !fromEvent && posts.length === 0
+  const fullName = profileRecord?.fullName ?? booking?.member.name ?? null
 
   return (
     <PageShell
       title={`@${handle}`}
-      // The most-linked-to page in the app had no way back out of it, and a
-      // shared link has no history to go back through — hence crumbs.
       crumbs={[{ label: 'Overzicht', to: '/' }, { label: 'Creators', to: '/?tab=creators' }]}
       brandMark={false}
-      subtitle={profile.platform === 'tiktok' ? 'TikTok creator' : 'Instagram creator'}
+      subtitle={[
+        profile.platform === 'tiktok' ? 'TikTok-creator' : 'Instagram-creator',
+        booking ? `geboekt voor ${booking.event.name}` : null,
+      ].filter(Boolean).join(' · ')}
       actions={
         <a href={profile.externalUrl} target="_blank" rel="noreferrer">
-          <Button variant="secondary" size="sm">Open profile ↗</Button>
+          <Button variant="secondary" size="sm">Profiel openen ↗</Button>
         </a>
       }
     >
       <ReadOnlyNotice />
 
-      {loading && <div className="text-[14px] text-[var(--color-ink-muted)] py-16 text-center">Loading…</div>}
-      {error && <div className="text-[13px] text-[var(--color-bad)] py-16 text-center">{error}</div>}
-      {!loading && !error && posts.length === 0 && (
-        <div className="text-[14px] text-[var(--color-ink-muted)] py-16 text-center">No confirmed detections for @{handle}.</div>
+      {fromEvent && (
+        <Card className="mb-4 px-4 py-2.5 text-[12px] text-[var(--color-warn)]">
+          Preview: echt gescrapte content uit een lokaal bestand, niet uit de database.
+        </Card>
       )}
 
-      {!loading && posts.length > 0 && (
+      {loading && !fromEvent && (
+        <div className="text-[14px] text-[var(--color-ink-muted)] py-16 text-center">Laden…</div>
+      )}
+      {error && !fromEvent && (
+        <div className="text-[13px] text-[var(--color-bad)] py-16 text-center">{error}</div>
+      )}
+
+      {nothingAnywhere && (
+        <Card className="p-10 text-center">
+          {booking ? (
+            <>
+              <p className="text-[14px] text-[var(--color-ink)]">
+                @{handle} staat op het roster van {booking.event.name} en plaatste niets.
+              </p>
+              <p className="text-[12px] text-[var(--color-ink-muted)] mt-2 leading-relaxed max-w-lg mx-auto">
+                Het venster liep {formatWindow(booking.event)}. Dit is geen lege pagina bij gebrek
+                aan data — er is gezocht op {booking.member.instagram ? `@${booking.member.instagram}` : 'het account'}
+                {booking.member.tiktok ? ` en @${booking.member.tiktok}` : ''} en er kwam niets terug.
+                Bij een betaalde boeking is dat de bevinding.
+              </p>
+            </>
+          ) : (
+            <p className="text-[14px] text-[var(--color-ink-muted)]">
+              Geen bevestigde detecties voor @{handle}.
+            </p>
+          )}
+        </Card>
+      )}
+
+      {/* ─── De evenement-tak ────────────────────────────────────────── */}
+      {fromEvent && (
         <div className="space-y-10">
-          {/* ─── Identity + KPIs ─────────────────────────────────────── */}
           <div className="grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-6">
-            {/* Profile card */}
-            <Card className="p-6">
-              <div className="flex items-center gap-4 mb-5">
-                <div className="w-20 h-20 rounded-full overflow-hidden border border-[var(--color-border)] bg-[var(--color-bg)] shrink-0">
-                  <Avatar src={profileRecord?.avatarUrl ?? profile.avatar} handle={handle} className="w-full h-full text-[24px]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <div className="text-[17px] font-medium truncate">@{handle}</div>
-                    {profile.verifiedAccount && <span className="text-[var(--color-accent)]" title="Verified account">✓</span>}
-                  </div>
-                  <div className="text-[12px] text-[var(--color-ink-muted)] mt-0.5">
-                    {profile.platform === 'tiktok' ? 'TikTok' : 'Instagram'}
-                    {followers > 0 ? ` · ${followers.toLocaleString()} followers` : ''}
-                  </div>
-                </div>
-              </div>
+            <IdentityCard
+              handle={handle} fullName={fullName} platform={profile.platform}
+              followers={followers} followersNote={followersNote}
+              avatar={profileRecord?.avatarUrl ?? profile.avatar}
+              bio={profileRecord?.bio ?? profile.bio} verified={profile.verifiedAccount}
+              products={profile.products} booking={booking}
+            />
 
-              {(profileRecord?.bio || profile.bio) && (
-                <p className="text-[12px] text-[var(--color-ink-muted)] leading-relaxed whitespace-pre-line mb-5 border-b border-[var(--color-border)] pb-5">
-                  {profileRecord?.bio || profile.bio}
-                </p>
-              )}
-
-              <div className="space-y-2.5 text-[12px]">
-                {profile.products.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5">
-                    {profile.products.map(([p, n]) => (
-                      <Badge key={p} tone="muted">{PRODUCT_LINE_LABEL[p] ?? p} ×{n}</Badge>
-                    ))}
-                  </div>
-                )}
-                <div className="text-[var(--color-ink-subtle)] tabular-nums pt-1">
-                  {profile.firstSeen && <>First seen {new Date(profile.firstSeen).toLocaleDateString('nl-NL', { day: '2-digit', month: 'short', year: 'numeric' })}</>}
-                  {profile.lastSeen && profile.lastSeen !== profile.firstSeen && <> · last {new Date(profile.lastSeen).toLocaleDateString('nl-NL', { day: '2-digit', month: 'short' })}</>}
-                </div>
-              </div>
-            </Card>
-
-            {/* KPI grid */}
+            {/* Per vlak, nooit opgeteld. Een TikTok-afspeling en een IG-like
+                zijn niet hetzelfde en een "totaal bereik" over de twee zegt
+                niets — zie lib/campaign.ts. */}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-px bg-[var(--color-border)] border border-[var(--color-border)] self-start">
-              <CreatorKpi label="Brand mentions" value={posts.length.toLocaleString()} sub="unique posts" />
-              <CreatorKpi label="Videos" value={profile.videoCount.toLocaleString()} sub={`${profile.imageCount} images`} />
-              <CreatorKpi label="Avg confidence" value={`${(profile.avgConf * 100).toFixed(0)}%`} sub="across hits" />
-              <CreatorKpi label="Combined likes" value={profile.totalLikes.toLocaleString()} sub="on detected posts" />
-              <CreatorKpi label="Combined views" value={profile.totalViews > 0 ? profile.totalViews.toLocaleString() : '—'} sub="video plays" />
-              <CreatorKpi label="Followers" value={followers > 0 ? followers.toLocaleString() : '—'} sub={followers > 0 ? (profile.platform === 'tiktok' ? 'TikTok' : 'Instagram') : 'not reported by the scrape'} />
+              <CreatorKpi
+                label="Met Stëlz"
+                value={fmtNum(totals.posts)}
+                sub={`${fmtNum(totals.hits)} beelden · uit ${fmtNum(eventRollup.judged)} bekeken`}
+              />
+              <CreatorKpi
+                label="TikTok-weergaven"
+                value={totals.tiktokVideos > 0 ? compactNum(totals.tiktokViews) : '—'}
+                sub={totals.tiktokVideos > 0
+                  ? `over ${fmtNum(totals.tiktokVideos)} video's met Stëlz`
+                  : 'geen TikToks met Stëlz'}
+              />
+              <CreatorKpi
+                label="IG-likes"
+                value={totals.likedPosts > 0 ? compactNum(totals.postLikes) : '—'}
+                sub={totals.likedPosts > 0
+                  ? `over ${fmtNum(totals.likedPosts)} posts`
+                  : 'geen posts met Stëlz'}
+              />
+              {SURFACES.map((s) => (
+                <CreatorKpi
+                  key={s}
+                  label={SURFACE_LABEL[s]}
+                  value={fmtNum(eventRollup.bySurface[s].posts || eventRollup.bySurface[s].items)}
+                  sub={eventRollup.bySurface[s].withStelz > 0
+                    ? `${fmtNum(eventRollup.bySurface[s].withStelz)} met Stëlz`
+                    : 'niets met Stëlz'}
+                />
+              ))}
             </div>
           </div>
 
-          {/* ─── Why this creator matters ────────────────────────────── */}
-          <WhyTheyMatter resonance={resonance} posts={posts} followers={followers} />
-
-          {/* ─── Content gallery ─────────────────────────────────────── */}
           <section className="space-y-5">
             <header className="border-b-2 border-[var(--color-ink)] pb-4">
-              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--color-accent)] font-medium mb-2">Content</div>
-              <h2 className="stelz-display text-[22px] lg:text-[26px] leading-none text-[var(--color-ink)]">Where Stëlz shows up</h2>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--color-accent)] font-medium mb-2">
+                Content
+              </div>
+              <h2 className="stelz-display text-[22px] lg:text-[26px] leading-none text-[var(--color-ink)]">
+                Waar Stëlz in beeld komt
+              </h2>
+              <p className="text-[11px] text-[var(--color-ink-subtle)] mt-2 leading-relaxed">
+                {fmtNum(eventHits.length)} van {fmtNum(eventRollup.items)} beelden
+                {booking && <>, binnen {formatWindow(booking.event)}</>}.
+                {totals.storyHits > 0 && (
+                  <> Stories dragen geen kijkcijfers — Instagram geeft die alleen aan het
+                    account zelf.</>
+                )}
+                {/* Niet stilzwijgend weglaten. Het is echte content van deze
+                    persoon, alleen niet van deze campagne — en zonder deze zin
+                    lijkt het alsof de tool haar posts gemist heeft. */}
+                {outsideHits > 0 && (
+                  <> Daarbuiten {outsideHits === 1 ? 'staat nog 1 beeld' : `staan nog ${fmtNum(outsideHits)} beelden`}{' '}
+                    met Stëlz erop, van vóór of ná deze periode — die tellen niet mee in
+                    de campagnecijfers.</>
+                )}
+              </p>
+            </header>
+            {eventHits.length === 0 ? (
+              <Card className="p-10 text-center text-[13px] text-[var(--color-ink-muted)]">
+                @{handle} plaatste {fmtNum(eventRollup.items)} beelden binnen het venster,
+                maar Stëlz stond op geen daarvan in beeld.
+              </Card>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {eventHits.map((r) => (
+                  <ContentCard
+                    key={`${r.surface}_${r.itemId}`}
+                    row={r}
+                    showTag={r.source === 'discovery'}
+                    onOpen={() => setOpenRow(r)}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
+      {/* ─── De Firestore-tak, ongewijzigd ───────────────────────────── */}
+      {!fromEvent && !loading && posts.length > 0 && (
+        <div className="space-y-10">
+          <div className="grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-6">
+            <IdentityCard
+              handle={handle} fullName={fullName} platform={profile.platform}
+              followers={followers} followersNote={followersNote}
+              avatar={profileRecord?.avatarUrl ?? profile.avatar}
+              bio={profileRecord?.bio ?? profile.bio} verified={profile.verifiedAccount}
+              products={profile.products} booking={booking}
+              firstSeen={profile.firstSeen} lastSeen={profile.lastSeen}
+            />
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-px bg-[var(--color-border)] border border-[var(--color-border)] self-start">
+              <CreatorKpi label="Vermeldingen" value={fmtNum(posts.length)} sub="unieke posts" />
+              <CreatorKpi label="Video's" value={fmtNum(profile.videoCount)} sub={`${fmtNum(profile.imageCount)} beelden`} />
+              <CreatorKpi label="Gem. zekerheid" value={`${(profile.avgConf * 100).toFixed(0)}%`} sub="over de treffers" />
+              <CreatorKpi
+                label={followersNote === 'TikTok-volgers' ? 'TikTok-volgers' : 'Volgers'}
+                value={followers > 0 ? fmtNum(followers) : '—'}
+                sub={followers > 0
+                  ? (profile.platform === 'tiktok' ? 'TikTok' : 'Instagram')
+                  : 'niet meegegeven door de scrape'}
+              />
+            </div>
+          </div>
+
+          <WhyTheyMatter resonance={resonance} posts={posts} followers={followers} />
+
+          <section className="space-y-5">
+            <header className="border-b-2 border-[var(--color-ink)] pb-4">
+              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--color-accent)] font-medium mb-2">
+                Content
+              </div>
+              <h2 className="stelz-display text-[22px] lg:text-[26px] leading-none text-[var(--color-ink)]">
+                Waar Stëlz in beeld komt
+              </h2>
             </header>
 
             <div className={CARD_GRID}>
@@ -200,7 +382,7 @@ export default function Creator() {
                     <MediaTile src={imageUrlFor(d)} size="card">
                       {d.frame_idx != null && (
                         <span className="absolute bottom-2 right-2 text-[10px] bg-[var(--color-ink)]/80 text-white px-2 py-0.5">
-                          ▶ video{(d.frame_hits ?? 0) > 1 ? ` · ${d.frame_hits} frames` : ''}
+                          ▶ video{(d.frame_hits ?? 0) > 1 ? ` · ${d.frame_hits} beelden` : ''}
                         </span>
                       )}
                       {d.verified === true && (
@@ -210,7 +392,7 @@ export default function Creator() {
                     <div className="p-3 flex flex-col gap-1.5">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-[11px] text-[var(--color-ink-muted)] truncate">
-                          {d.product_line ? (PRODUCT_LINE_LABEL[d.product_line] ?? d.product_line) : 'Detection'}
+                          {d.product_line ? (PRODUCT_LINE_LABEL[d.product_line] ?? d.product_line) : 'Detectie'}
                           {d.surface_type ? ` · ${d.surface_type.replace(/_/g, ' ')}` : ''}
                         </span>
                         <span className={`text-[12px] tabular-nums font-medium shrink-0 ${conf >= 85 ? 'text-[var(--color-good)]' : conf >= 75 ? 'text-[var(--color-warn)]' : 'text-[var(--color-bad)]'}`}>
@@ -222,10 +404,10 @@ export default function Creator() {
                       )}
                       <div className="flex items-center justify-between text-[11px] text-[var(--color-ink-subtle)] tabular-nums">
                         <span>
-                          {(d.likes_count ?? 0) > 0 && `♥ ${(d.likes_count!).toLocaleString()}`}
-                          {(d.views_count ?? 0) > 0 && `  ▶ ${(d.views_count!).toLocaleString()}`}
+                          {(d.likes_count ?? 0) > 0 && `♥ ${fmtNum(d.likes_count)}`}
+                          {(d.views_count ?? 0) > 0 && `  ▶ ${fmtNum(d.views_count)}`}
                         </span>
-                        <span>{d.posted_at ? new Date(d.posted_at).toLocaleDateString('nl-NL', { day: '2-digit', month: 'short' }) : ''}</span>
+                        <span>{fmtDate(d.posted_at)}</span>
                       </div>
                     </div>
                   </button>
@@ -244,29 +426,104 @@ export default function Creator() {
           .sort((a, b) => (a.frame_idx ?? 0) - (b.frame_idx ?? 0)) : []}
         onClose={() => setActive(null)}
       />
+      <StoryDetail
+        row={openRow ? { ...openRow, surfaceLabel: SURFACE_LABEL[openRow.surface] } : null}
+        onClose={() => setOpenRow(null)}
+      />
     </PageShell>
   )
 }
 
+/** Wie het is. Gedeeld door beide takken, zodat een creator er hetzelfde
+ *  uitziet of het cijfer nu uit Firestore of uit een evenement komt. */
+function IdentityCard({
+  handle, fullName, platform, followers, followersNote, avatar, bio, verified,
+  products, booking, firstSeen, lastSeen,
+}: {
+  handle: string
+  fullName: string | null
+  platform: string
+  followers: number
+  avatar: string | null
+  bio: string | null
+  verified: boolean
+  /** Welk publiek dit getal beschrijft — "volgers" of "TikTok-volgers". Zonder
+   *  dit woord staat er een TikTok-cijfer onder een Instagram-profiel. */
+  followersNote: string | null
+  products: [string, number][]
+  booking: { event: { id: string; name: string }; member: { name: string } } | null
+  firstSeen?: string | null
+  lastSeen?: string | null
+}) {
+  return (
+    <Card className="p-6">
+      <div className="flex items-center gap-4 mb-5">
+        <div className="w-20 h-20 rounded-full overflow-hidden border border-[var(--color-border)] bg-[var(--color-bg)] shrink-0">
+          <Avatar src={avatar} handle={handle} className="w-full h-full text-[24px]" />
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <div className="text-[17px] font-medium truncate">@{handle}</div>
+            {verified && <span className="text-[var(--color-accent)]" title="Geverifieerd account">✓</span>}
+          </div>
+          {fullName && (
+            <div className="text-[12px] text-[var(--color-ink-muted)] truncate">{fullName}</div>
+          )}
+          <div className="text-[12px] text-[var(--color-ink-subtle)] mt-0.5">
+            {platform === 'tiktok' ? 'TikTok' : 'Instagram'}
+            {followers > 0
+              ? ` · ${fmtNum(followers)} ${followersNote ?? 'volgers'}`
+              : ' · volgersaantal niet meegegeven door de scrape'}
+          </div>
+        </div>
+      </div>
+
+      {bio && (
+        <p className="text-[12px] text-[var(--color-ink-muted)] leading-relaxed whitespace-pre-line mb-5 border-b border-[var(--color-border)] pb-5">
+          {bio}
+        </p>
+      )}
+
+      <div className="space-y-2.5 text-[12px]">
+        {booking && (
+          <div>
+            <Badge tone="accent">Geboekt · {booking.event.name}</Badge>
+          </div>
+        )}
+        {products.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {products.map(([p, n]) => (
+              <Badge key={p} tone="muted">{PRODUCT_LINE_LABEL[p] ?? p} ×{n}</Badge>
+            ))}
+          </div>
+        )}
+        {(firstSeen || lastSeen) && (
+          <div className="text-[var(--color-ink-subtle)] tabular-nums pt-1">
+            {firstSeen && <>Eerst gezien {fmtDate(firstSeen)}</>}
+            {lastSeen && lastSeen !== firstSeen && <> · laatst {fmtDate(lastSeen)}</>}
+          </div>
+        )}
+      </div>
+    </Card>
+  )
+}
+
 /**
- * The "why does this person matter" panel: SRS layer breakdown on the left,
- * audience profile on the right.
+ * "Waarom doet deze persoon ertoe": de SRS-opbouw links, het publieksprofiel
+ * rechts.
  *
- * A follower count alone can't answer that question — it can't separate someone
- * with reach from someone genuinely embedded in the scene the brand lives in.
- * The SRS layers can, which is the whole reason the score exists; it was simply
- * never rendered anywhere in the app (fetchResonanceForCreator was written and
- * left unused).
+ * Een volgersaantal alleen kan die vraag niet beantwoorden — het scheidt iemand
+ * met bereik niet van iemand die echt in de scene zit waar het merk leeft. De
+ * SRS-lagen kunnen dat wél, en dat is de hele reden dat de score bestaat; hij
+ * werd alleen nergens getekend (fetchResonanceForCreator stond ongebruikt).
  */
 function WhyTheyMatter({
   resonance, posts, followers,
 }: { resonance: ResonanceRow | null; posts: DetectionRow[]; followers: number }) {
-  // Audience profile is derived from detections, so it stands on its own when
-  // there is no SRS doc yet.
   const scenes = useMemo(() => sceneBreakdown(posts).filter((s) => s.key !== 'other').slice(0, 3), [posts])
   const engagement = useMemo(() => {
-    // Likes per post against follower count. Only meaningful with both, and
-    // only over posts that actually carry a like count.
+    // Likes per post afgezet tegen het volgersaantal. Alleen zinvol met allebei,
+    // en alleen over posts die daadwerkelijk een like-telling dragen.
     const withLikes = posts.filter((p) => (p.likes_count ?? 0) > 0)
     if (!withLikes.length || followers <= 0) return null
     const avgLikes = withLikes.reduce((s, p) => s + (p.likes_count ?? 0), 0) / withLikes.length
@@ -280,19 +537,18 @@ function WhyTheyMatter({
   return (
     <section className="space-y-5">
       <header className="border-b-2 border-[var(--color-ink)] pb-4">
-        <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--color-accent)] font-medium mb-2">Audience</div>
+        <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--color-accent)] font-medium mb-2">Publiek</div>
         <h2 className="stelz-display text-[22px] lg:text-[26px] leading-none text-[var(--color-ink)]">
-          Why this creator matters
+          Waarom deze creator ertoe doet
         </h2>
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* ── Resonance breakdown ── */}
         <Card className="p-6">
           {!resonance ? (
             <div className="text-[12px] text-[var(--color-ink-muted)] leading-relaxed">
-              No resonance score for @{posts[0]?.creator_handle} yet. Scoring runs as its own
-              step after a scan, so creators found in the most recent run appear here later.
+              Nog geen resonantiescore voor @{posts[0]?.creator_handle}. Scoren is een
+              aparte stap na een scan, dus creators uit de laatste run verschijnen hier later.
             </div>
           ) : (
             <>
@@ -301,7 +557,7 @@ function WhyTheyMatter({
                   {Math.round(resonance.srs)}
                 </span>
                 <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-ink-subtle)]">
-                  Resonance
+                  Resonantie
                 </span>
               </div>
               {headline && (
@@ -319,10 +575,10 @@ function WhyTheyMatter({
                     <div className="flex items-baseline justify-between gap-3">
                       <span className="text-[12px] font-medium" title={l.meaning}>{l.label}</span>
                       <span className="text-[11px] tabular-nums text-[var(--color-ink-subtle)] shrink-0">
-                        {/* A null layer says "not computed" and must not be
-                            drawn as a zero bar — the two mean opposite things. */}
-                        {l.value == null ? 'not scored' : `${Math.round(l.value * 100)}`}
-                        <span className="text-[var(--color-ink-subtle)]"> · {l.weight}% weight</span>
+                        {/* Een lege laag zegt "niet berekend" en mag niet als
+                            nulbalk getekend worden — dat betekent het omgekeerde. */}
+                        {l.value == null ? 'niet gescoord' : `${Math.round(l.value * 100)}`}
+                        <span className="text-[var(--color-ink-subtle)]"> · {l.weight}% gewicht</span>
                       </span>
                     </div>
                     <div className="mt-1 h-1.5 bg-[var(--color-border)] relative overflow-hidden">
@@ -339,35 +595,33 @@ function WhyTheyMatter({
               </ul>
 
               <p className="mt-5 pt-3 border-t border-[var(--color-border)] text-[11px] text-[var(--color-ink-subtle)] leading-relaxed">
-                Weights depend on how much confirmed data the brand has, so scores are
-                comparable between creators but not across brands at different stages.
+                Gewichten hangen af van hoeveel bevestigde data het merk heeft, dus scores zijn
+                onderling vergelijkbaar maar niet tussen merken in verschillende fases.
               </p>
             </>
           )}
         </Card>
 
-        {/* ── Follower profile ── */}
         <Card className="p-6">
           <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-ink-subtle)] mb-4">
-            Audience profile
+            Publieksprofiel
           </div>
 
           <dl className="space-y-3 text-[12px]">
             <div className="flex items-baseline justify-between gap-3">
-              <dt className="text-[var(--color-ink-muted)]">Reach</dt>
+              <dt className="text-[var(--color-ink-muted)]">Volgers</dt>
               <dd className="tabular-nums font-medium">
-                {followers > 0 ? followers.toLocaleString() : '—'}
-                <span className="text-[var(--color-ink-subtle)] font-normal"> followers</span>
+                {followers > 0 ? fmtNum(followers) : '—'}
               </dd>
             </div>
             <div className="flex items-baseline justify-between gap-3">
-              <dt className="text-[var(--color-ink-muted)]">Avg likes on brand posts</dt>
+              <dt className="text-[var(--color-ink-muted)]">Gem. likes op merkposts</dt>
               <dd className="tabular-nums font-medium">
-                {engagement ? Math.round(engagement.avgLikes).toLocaleString() : '—'}
+                {engagement ? fmtNum(engagement.avgLikes) : '—'}
               </dd>
             </div>
             <div className="flex items-baseline justify-between gap-3">
-              <dt className="text-[var(--color-ink-muted)]">Engagement rate</dt>
+              <dt className="text-[var(--color-ink-muted)]">Interactiepercentage</dt>
               <dd className="tabular-nums font-medium">
                 {engagement ? `${engagement.rate.toFixed(1)}%` : '—'}
               </dd>
@@ -380,7 +634,7 @@ function WhyTheyMatter({
             )}
             {resonance?.category && (
               <div className="flex items-baseline justify-between gap-3">
-                <dt className="text-[var(--color-ink-muted)]">Category</dt>
+                <dt className="text-[var(--color-ink-muted)]">Categorie</dt>
                 <dd className="font-medium capitalize">{resonance.category}</dd>
               </div>
             )}
@@ -388,11 +642,11 @@ function WhyTheyMatter({
 
           <div className="mt-5 pt-4 border-t border-[var(--color-border)]">
             <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-ink-subtle)] mb-2.5">
-              Scenes they post in
+              Waar ze over posten
             </div>
             {scenes.length === 0 ? (
               <p className="text-[12px] text-[var(--color-ink-muted)]">
-                Not enough scene detail on these posts to place them.
+                Te weinig sceneinformatie op deze posts om ze te plaatsen.
               </p>
             ) : (
               <ul className="space-y-1.5">
@@ -401,7 +655,7 @@ function WhyTheyMatter({
                     <span>{s.label}</span>
                     <span className="tabular-nums text-[var(--color-ink-subtle)] shrink-0">
                       {s.total} {s.total === 1 ? 'post' : 'posts'}
-                      {s.untagged > 0 ? ` · ${s.untagged} untagged` : ''}
+                      {s.untagged > 0 ? ` · ${s.untagged} zonder tag` : ''}
                     </span>
                   </li>
                 ))}

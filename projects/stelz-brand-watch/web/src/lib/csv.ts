@@ -6,6 +6,8 @@
 import type { DetectionRow } from './types'
 import { classifySignal } from './signal'
 import type { CommunityProfile } from './communities'
+import type { CampaignRow } from './campaign'
+import { HIT_COLUMNS, hitText, hitValue } from './hits'
 
 /**
  * Quote a CSV field.
@@ -70,6 +72,37 @@ export function detectionsCsv(rows: DetectionRow[]): string {
       d.verified === true ? 'yes' : '',
       d.is_false_positive === true ? 'yes' : '',
       d.detection_id,
+    ]),
+  )
+}
+
+/**
+ * Every Stëlz sighting, one row each — the table on screen, as a file.
+ *
+ * Columns come from HIT_COLUMNS rather than being listed again here, so the
+ * export and the screen cannot drift apart. That drift is the normal failure:
+ * someone adds a column to the table, nobody adds it to the export, and the
+ * spreadsheet a client works from quietly describes an older campaign.
+ *
+ * BLANKS STAY BLANK. A story has no view count, and writing 0 into that cell
+ * turns "Instagram does not tell us" into "nobody watched" the moment somebody
+ * sums the column. Numeric columns therefore carry raw numbers or nothing at
+ * all — never the "—" the screen shows, which would also make the column
+ * unsummable in Excel.
+ */
+export function campaignCsv(rows: CampaignRow[]): string {
+  const headers = [...HIT_COLUMNS.map((c) => c.label), 'Zekerheid', 'Beschrijving', 'Link']
+  return toCsv(
+    headers,
+    rows.map((r) => [
+      ...HIT_COLUMNS.map((c) => {
+        const v = hitValue(r, c.key)
+        if (v == null) return ''
+        return c.numeric ? v : hitText(r, c.key)
+      }),
+      r.confidence != null ? Math.round(r.confidence * 100) : '',
+      r.detection?.context ?? '',
+      r.url ?? '',
     ]),
   )
 }

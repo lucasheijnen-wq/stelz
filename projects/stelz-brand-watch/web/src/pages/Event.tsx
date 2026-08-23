@@ -27,6 +27,7 @@ import { Kpi } from '../components/campaign/Kpi'
 import { SurfaceCard } from '../components/campaign/SurfaceCard'
 import { ContentCard } from '../components/campaign/ContentCard'
 import { CreatorTable } from '../components/campaign/CreatorTable'
+import { NumbersTab } from '../components/campaign/NumbersTab'
 import {
   joinCampaign, campaignRollup, stelzShare,
   SURFACE_LABEL, SURFACES,
@@ -44,11 +45,17 @@ import type { DetectionRow } from '../lib/types'
 import { fmtNum, compactNum } from '../lib/format'
 import { useCampaignPreview, useCampaignDetectionsPreview } from '../lib/devPreview'
 
-type Tab = 'roster' | 'discovery' | 'stories' | 'settings'
+type Tab = 'roster' | 'discovery' | 'cijfers' | 'stories' | 'settings'
 
 const TABS: { id: Tab; label: string; sub: string }[] = [
   { id: 'roster', label: 'Roster', sub: 'wat de geboekte creators plaatsten' },
   { id: 'discovery', label: 'Los gevonden', sub: 'iedereen daarbuiten' },
+  // The only tab that puts both sources in one view. Everywhere else they are
+  // kept apart because paid delivery and organic pickup are worth different
+  // things — but "hoe doet Stëlz het op social" is exactly the question that
+  // wants them beside each other, so this tab answers it with a Bron column
+  // keeping every row attributable.
+  { id: 'cijfers', label: 'Cijfers', sub: 'alle treffers met hun cijfers' },
   { id: 'stories', label: 'Stories', sub: 'de 24-uurs laag' },
   { id: 'settings', label: 'Instellingen', sub: 'roster, periode, hashtags' },
 ]
@@ -287,6 +294,16 @@ function EventBody({ ev, params, setParams }: {
         }} />
       ) : allRows.length === 0 ? (
         <EmptyState ev={ev} />
+      ) : tab === 'cijfers' ? (
+        <NumbersTab
+          rows={scopeRows}
+          ev={ev}
+          roster={roster}
+          profiles={profiles}
+          creator={creator}
+          onPickCreator={(h) => setParam('c', h === creator ? null : h)}
+          onOpen={setOpen}
+        />
       ) : (
         <>
           <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-4">

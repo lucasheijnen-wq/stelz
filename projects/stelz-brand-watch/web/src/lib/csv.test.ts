@@ -5,7 +5,9 @@
 // caption beginning "=" is a formula there, not text.
 
 import { describe, it, expect } from 'vitest'
-import { detectionsCsv, communitiesCsv, datedFilename } from './csv'
+import { detectionsCsv, communitiesCsv, campaignCsv, datedFilename } from './csv'
+import { joinCampaign } from './campaign'
+import { HIT_COLUMNS } from './hits'
 import type { DetectionRow } from './types'
 
 function row(p: Partial<DetectionRow>): DetectionRow {
@@ -66,6 +68,64 @@ describe('communitiesCsv', () => {
     const csv = communitiesCsv([])
     expect(csv.split('\r\n')).toHaveLength(1)
     expect(csv).toContain('scene')
+  })
+})
+
+describe('campaignCsv', () => {
+  const hits = () => joinCampaign([
+    {
+      itemId: 'tt', platform: 'tiktok', surface: 'tiktok', creatorHandle: 'anna',
+      url: 'https://tiktok.com/@anna/video/1', coverUrl: null, videoUrl: null,
+      mediaType: 'video', postedAt: '2026-08-22T12:00:00Z', caption: null,
+      hashtags: [], mentions: [], videoDuration: null,
+      views: 194_300, likes: 7_674, comments: 31, shares: 0, pollVotes: null,
+      isPaidPartnership: false,
+    },
+    {
+      itemId: 'st', platform: 'instagram', surface: 'story', creatorHandle: 'cato',
+      url: null, coverUrl: null, videoUrl: null,
+      mediaType: 'image', postedAt: '2026-08-20T12:00:00Z', caption: null,
+      hashtags: [], mentions: [], videoDuration: null,
+      views: null, likes: null, comments: null, shares: null, pollVotes: null,
+      isPaidPartnership: false,
+    },
+  ], [row({ post_id: 'tt' }), row({ post_id: 'st', detection_id: 'd2' })])
+
+  it('leaves an unpublished figure empty rather than writing a zero', () => {
+    // The load-bearing one. A story has no view count; a 0 there becomes
+    // "nobody watched" the moment somebody sums the column in a sheet.
+    const [header, ttRow, stRow] = campaignCsv(hits()).split('\r\n')
+    const col = header.split(',').findIndex((h) => h === '"Weergaven"')
+    expect(col).toBeGreaterThan(-1)
+    expect(ttRow.split(',')[col]).toBe('"194300"')
+    expect(stRow.split(',')[col]).toBe('""')
+  })
+
+  it('keeps a measured zero, because that one IS a measurement', () => {
+    const header = campaignCsv(hits()).split('\r\n')[0].split(',')
+    const col = header.findIndex((h) => h === '"Delen"')
+    expect(campaignCsv(hits()).split('\r\n')[1].split(',')[col]).toBe('"0"')
+  })
+
+  it('exports exactly the columns the table shows, plus the link', () => {
+    const header = campaignCsv([]).split('\r\n')[0]
+    for (const c of HIT_COLUMNS) expect(header).toContain(`"${c.label}"`)
+    expect(header).toContain('"Link"')
+  })
+
+  it('neutralises a caption that Excel would run as a formula', () => {
+    const rows = joinCampaign([{
+      itemId: 'x', platform: 'instagram', surface: 'post', creatorHandle: 'anna',
+      url: null, coverUrl: null, videoUrl: null, mediaType: 'image',
+      postedAt: '2026-08-20T12:00:00Z', caption: null, hashtags: [], mentions: [],
+      videoDuration: null, views: null, likes: 1, comments: null, shares: null,
+      pollVotes: null, isPaidPartnership: false,
+    }], [row({ post_id: 'x', context: '=HYPERLINK("http://x","klik")' })])
+    expect(campaignCsv(rows)).toContain(`"'=HYPERLINK`)
+  })
+
+  it('renders an empty selection as a header alone', () => {
+    expect(campaignCsv([]).split('\r\n')).toHaveLength(1)
   })
 })
 

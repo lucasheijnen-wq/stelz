@@ -18,7 +18,7 @@
 // ever gets slow, stamping is purely additive.
 
 import type { Source } from './campaign'
-import type { StelzEvent } from '../data/events'
+import { EVENTS, type StelzEvent, type EventRosterMember } from '../data/events'
 
 export type EventMatch = {
   eventId: string
@@ -112,6 +112,27 @@ export function rosterAccounts(ev: StelzEvent): Set<string> {
     if (tt) out.add(tt)
   }
   return out
+}
+
+/**
+ * Was this account booked for anything, and by whom?
+ *
+ * The question a creator page has to answer before it can say anything useful
+ * about an empty result. "No detections for @davidscholten" and "@davidscholten
+ * was booked for Lowlands and posted nothing" are the same absence of data and
+ * opposite findings — the first reads as a gap in the tool, the second is the
+ * single most valuable line a paid roster produces.
+ *
+ * Matches on either platform, because the roster books a PERSON and Instagram
+ * and TikTok handles rarely agree.
+ */
+export function bookingFor(handle: string, events: StelzEvent[] = EVENTS):
+  { event: StelzEvent; member: EventRosterMember } | null {
+  const want = clean(handle)
+  if (!want) return null
+  return events.flatMap((event) => event.roster
+    .filter((m) => clean(m.instagram) === want || clean(m.tiktok) === want)
+    .map((member) => ({ event, member })))[0] ?? null
 }
 
 /** TikTok handle -> that person's Instagram handle.
