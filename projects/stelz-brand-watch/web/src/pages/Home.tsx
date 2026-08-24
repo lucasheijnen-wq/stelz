@@ -11,6 +11,7 @@ import { Sparkline, LineChart, BarChart, Donut, StackedDayBars, type Series } fr
 import { bucketByDay } from '../lib/buckets'
 import { DetectionDrawer } from '../components/DetectionDrawer'
 import { ScanPanel } from '../components/ScanPanel'
+import { scanIsStale } from '../lib/scanProgress'
 import { StoriesStrip } from '../components/StoriesStrip'
 import {
   fetchDetections, fetchTopResonance, fetchCreatorSubcultures, fetchSubcultures,
@@ -200,9 +201,11 @@ export default function Home() {
   useEffect(() => {
     const unsub = fbSubscribeScanState((s) => {
       setScanState(s)
-      const started = s?.startedAt ? new Date(s.startedAt).getTime() : 0
       const finished = s?.finishedAt ? new Date(s.finishedAt).getTime() : 0
-      const running = !!started && !finished
+      // Stale-gated: a scan that died weeks ago otherwise reads as "running"
+      // here and keeps this page re-fetching Firestore every 25 seconds for
+      // as long as it is open.
+      const running = !!s?.startedAt && !finished && !scanIsStale(s)
       const recentlyDone = !!finished && (Date.now() - finished) < 3 * 60_000
       setScanActive(running || recentlyDone)
     })
@@ -2553,10 +2556,13 @@ function RunScanButton({ onComplete, liveHits, onStepErrors }: {
   // nothing on the page is changing. Read during render it only fired if the
   // user happened to click something, so the panel could sit on "18/19"
   // indefinitely, which is the exact failure this check exists to catch.
+  //
+  // The judgement itself lives in lib/scanProgress.scanIsStale, shared with
+  // the panel. This button used to roll its own with `lastActivityAt ?? 0`,
+  // which called a scan stalled in the second between startedAt landing and
+  // the first heartbeat — a freshly clicked scan flashed "Stalled at 0/0".
   const now = useNow(15_000)
-  const lastActMs = state?.lastActivityAt ? new Date(state.lastActivityAt).getTime() : 0
-  const staleMs = now - lastActMs
-  const isStale = !!state?.startedAt && !state.finishedAt && staleMs > 5 * 60_000
+  const isStale = scanIsStale(state, now)
   const running = !!state?.startedAt && !state.finishedAt && !isStale
   const progressPct = queued > 0 ? Math.round((done / queued) * 100) : 0
 
@@ -2648,7 +2654,11 @@ function RunScanButton({ onComplete, liveHits, onStepErrors }: {
               <span className="tabular-nums text-[var(--color-ink-muted)]">
                 · {(state?.postsWritten ?? 0).toLocaleString()} posts
               </span>
-              <span className="text-[var(--color-ink-subtle)]">· no activity {timeAgo(state!.lastActivityAt!)}</span>
+              {/* A scan can stall before its first heartbeat ever lands; then
+                  there is no lastActivityAt to date the silence with. */}
+              <span className="text-[var(--color-ink-subtle)]">
+                · no activity {state?.lastActivityAt ? timeAgo(state.lastActivityAt) : 'since start'}
+              </span>
             </>
           ) : running ? (
             <>

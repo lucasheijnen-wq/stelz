@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { analysisProgress, scanHeadline, scanPhase, stepViews, STEP_ORDER } from './scanProgress'
+import { analysisProgress, scanHeadline, scanIsStale, scanPhase, stepViews, STEP_ORDER } from './scanProgress'
 import type { ScanState } from './firestore'
 
 const NOW = Date.parse('2026-08-20T12:00:00Z')
@@ -151,5 +151,61 @@ describe('scanHeadline', () => {
     expect(scanHeadline(null, NOW).title).toMatch(/Nog geen scan/)
     expect(scanHeadline(state({ lastActivityAt: '2026-08-20T11:50:00Z' }), NOW).tone).toBe('bad')
     expect(scanHeadline(state({ finishedAt: '2026-08-20T11:58:00Z' }), NOW).tone).toBe('good')
+  })
+})
+
+// De drie manieren waarop de homepage-scan eeuwig "bezig" kon lijken. Alle
+// drie gevonden op een dashboard dat wekenlang "Beelden analyseren 40 van 100"
+// toonde over een fan-out die allang dood was — wat leest als een scrape die
+// tegelijk draait én kapot is.
+describe('een dode scan mag niet eeuwig bezig lijken', () => {
+  const WEKEN_LATER = NOW + 21 * 24 * 3600_000
+
+  it('verklaart een halverwege bevroren fan-out na uren dood, niet analysing', () => {
+    // Het "does NOT call it stalled"-geval hierboven, maar dan weken later:
+    // dezelfde tellers, allang geen workers meer. analysing overrulet
+    // staleness bewust (de heartbeat bevriest tijdens de detect-fase), dus
+    // zonder tijdshorizon was dit voor altijd "Beelden analyseren".
+    const s = state({
+      lastActivityAt: '2026-08-20T11:50:00Z',
+      finishedAt: '2026-08-20T11:52:00Z',
+      detectTasksEnqueued: 100,
+      detectionsCompleted: 40,
+    })
+    expect(scanPhase(s, WEKEN_LATER)).toBe('error')
+    const row = stepViews(s, {}, WEKEN_LATER).find((v) => v.key === 'analysis')!
+    expect(row.state).toBe('error')
+    expect(row.detail).toBe('40 van 100')
+    expect(row.error).toContain('niet afgemaakt')
+  })
+
+  it('laat een gezonde, verse fan-out gewoon analysing zijn', () => {
+    const s = state({
+      finishedAt: '2026-08-20T11:58:00Z',
+      detectTasksEnqueued: 100,
+      detectionsCompleted: 40,
+    })
+    expect(scanPhase(s, NOW)).toBe('analysing')
+  })
+
+  it('noemt een onafgemaakte, verlaten scan stalled', () => {
+    const s = state({ detectTasksEnqueued: 100, detectionsCompleted: 40 })
+    expect(scanPhase(s, WEKEN_LATER)).toBe('stalled')
+  })
+
+  it('vangt een scan die vóór zijn eerste heartbeat crashte', () => {
+    // lastActivityAt is er nooit gekomen; de oude guard eiste last > 0 en
+    // liet deze sessie voor altijd als 'scraping' staan — een pulserende stip
+    // op een scan die bij de geboorte stierf.
+    const s = state({ lastActivityAt: null })
+    expect(scanPhase(s, NOW)).toBe('stalled')
+  })
+
+  it('scanIsStale: een net gestarte scan zonder heartbeat is niet stale', () => {
+    // De knop rekende met lastActivityAt ?? 0 en flitste "Stalled at 0/0" in
+    // de seconde tussen startedAt en de eerste worker-write.
+    const s = state({ startedAt: '2026-08-20T11:59:30Z', lastActivityAt: null })
+    expect(scanIsStale(s, NOW)).toBe(false)
+    expect(scanPhase(s, NOW)).toBe('scraping')
   })
 })
