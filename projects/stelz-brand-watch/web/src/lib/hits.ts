@@ -25,8 +25,8 @@ import { isStelzStory } from './storyStats'
 import { fmtDate, fmtNum } from './format'
 
 export type HitColumnKey =
-  | 'postedAt' | 'handle' | 'source' | 'surface'
-  | 'views' | 'likes' | 'comments' | 'shares' | 'followers'
+  | 'postedAt' | 'handle' | 'source' | 'surface' | 'slide'
+  | 'views' | 'likes' | 'comments' | 'shares' | 'saves' | 'followers'
   | 'product' | 'placement' | 'visibility' | 'foundVia'
 
 export type HitColumn = {
@@ -38,6 +38,10 @@ export type HitColumn = {
    *  metric at all (a date, a handle, our own verdict) and so cannot be
    *  "missing" — only a metric column can have an honest blank. */
   publishedBy?: Surface[]
+  /** Drop the column when it is blank for every row in view. Implied by
+   *  `numeric`; set it on a text column that is genuinely absent rather than
+   *  unknown — "Dia" on a selection with no carousel in it. */
+  hideWhenEmpty?: boolean
   /** Column header tooltip. */
   title?: string
 }
@@ -51,6 +55,13 @@ export const HIT_COLUMNS: HitColumn[] = [
   { key: 'source', label: 'Bron', numeric: false,
     title: 'Roster = geboekt en betaald. Los gevonden = kwam er vanzelf.' },
   { key: 'surface', label: 'Vlak', numeric: false },
+  // WITHOUT THIS COLUMN THE EXPORT LIES BY OMISSION. One row per sighting means
+  // a carousel appears five times, each row repeating the post's 2.179 likes,
+  // and nothing on the sheet says they are one post — so summing the Likes
+  // column in Excel reproduces exactly the 147% overstatement the totals had.
+  // "3/10" says which slide; blank means the row is the whole post.
+  { key: 'slide', label: 'Dia', numeric: false, hideWhenEmpty: true,
+    title: 'Een carrousel wordt per dia beoordeeld. Rijen met dezelfde dia-reeks zijn één post en delen dus één keer likes en reacties — tel ze niet bij elkaar op.' },
   { key: 'views', label: 'Weergaven', numeric: true, publishedBy: ['tiktok', 'post'],
     title: 'TikTok publiceert afspeeltellingen. Op Instagram alleen een reel, nooit een fotopost of een story.' },
   { key: 'likes', label: 'Likes', numeric: true, publishedBy: ['tiktok', 'post'],
@@ -58,6 +69,8 @@ export const HIT_COLUMNS: HitColumn[] = [
   { key: 'comments', label: 'Reacties', numeric: true, publishedBy: ['tiktok', 'post'] },
   { key: 'shares', label: 'Delen', numeric: true, publishedBy: ['tiktok'],
     title: 'Alleen TikTok publiceert dit.' },
+  { key: 'saves', label: 'Opgeslagen', numeric: true, publishedBy: ['tiktok'],
+    title: 'Bewaard om later terug te kijken. Alleen TikTok publiceert dit, en het zegt meer dan een like.' },
   { key: 'followers', label: 'Volgers', numeric: true,
     title: 'Van het account op het moment van scrapen. Niet iedereen geeft het prijs.' },
   { key: 'product', label: 'Product', numeric: false },
@@ -95,10 +108,15 @@ export function hitValue(r: CampaignRow, key: HitColumnKey): string | number | n
     case 'handle': return (r.platformHandle || r.creatorHandle || '').toLowerCase() || null
     case 'source': return SOURCE_LABEL[r.source]
     case 'surface': return SURFACE_LABEL[r.surface]
+    // Blank for anything that is not a carousel — a TikTok has no slides, and
+    // "1/1" would suggest it might have. `slot` is 0-based in the archive.
+    case 'slide': return r.slots != null && r.slots > 1 && r.slot != null
+      ? `${r.slot + 1}/${r.slots}` : null
     case 'views': return r.views ?? null
     case 'likes': return r.likes ?? null
     case 'comments': return r.comments ?? null
     case 'shares': return r.shares ?? null
+    case 'saves': return r.saves ?? null
     case 'followers': return r.detection?.follower_count ?? null
     case 'product': return r.detection?.product_line ?? null
     case 'placement': return r.placement ?? null
@@ -187,6 +205,9 @@ export function bucketByRange(
 }
 
 export type HitTotals = {
+  /** SIGHTINGS: how many times the can was seen. Three slides of one carousel
+   *  are three sightings — and one post. Only this field counts them that way;
+   *  every metric below is per post. */
   hits: number
   /** Sightings deduped to posts: a carousel where the can is on slides 3 and 7
    *  is one post, not two. */
@@ -194,14 +215,48 @@ export type HitTotals = {
   accounts: number
   /** Plays on the videos Stëlz was actually visible in — not on everything the
    *  roster posted. This tab answers "what did Stëlz get", so the denominator
-   *  is the sightings, and `tiktokVideos` says how many carried the figure. */
+   *  is the posts, and `tiktokVideos` says how many carried the figure. */
   tiktokViews: number
   tiktokVideos: number
   postLikes: number
   likedPosts: number
-  /** Stories among the sightings. Named because it is the count with no
-   *  audience figure attached, and that has to be visible rather than absent. */
+  /** Stories among the sightings, as posts. Named because it is the count with
+   *  no audience figure attached, and that has to be visible rather than absent. */
   storyHits: number
+  /**
+   * The six header figures: the same event summed across platforms.
+   *
+   * A TikTok play and an Instagram reel play are one event on two platforms, as
+   * are a digg and a like — those add. What never happens is a figure combining
+   * plays with likes, which is the "total reach" this codebase had to unpick
+   * once already (100.928.763 reported where 1.167.605 was true).
+   *
+   * PER POST, NOT PER SIGHTING, and that distinction cost 10.161 likes the
+   * first time it was got wrong. A post's like count belongs to the post: when
+   * the can shows up on five slides of @sterredegoedex's carousel, that is five
+   * sightings of one post with 2.179 likes — not 10.895 likes. Summing the rows
+   * reported 48.919 where 38.758 was true, a 26% overstatement on a headline
+   * figure. Every metric here is therefore reduced over unique `postKey`.
+   *
+   * Each total ships with the number of POSTS that carried it. 844.643 views
+   * across 27 of 58 posts is a different claim from 844.643 across all 58, and
+   * printing the total without the count makes the second one.
+   */
+  views: number
+  viewedOn: number
+  likes: number
+  likedOn: number
+  comments: number
+  commentedOn: number
+  shares: number
+  sharedOn: number
+  /** Saves. TikTok only, and the strongest intent signal it publishes. */
+  saves: number
+  savedOn: number
+  /** Likes + comments + shares against plays, TikTok only — the one surface
+   *  that reports both halves of the ratio. Null when nothing was played. */
+  engagementRate: number | null
+  tiktokInteractions: number
   /**
    * Followers of the TIKTOK accounts behind these sightings.
    *
@@ -264,17 +319,36 @@ export function followerIndex(rows: CampaignRow[]): Map<string, number> {
 export function hitTotals(
   hits: CampaignRow[], followers: Map<string, number> = followerIndex(hits),
 ): HitTotals {
-  const posts = new Set<string>()
+  // ONE ROW PER POST BEFORE ANY METRIC IS ADDED. The rows are sightings, and a
+  // carousel produces one per slide the can appears on — each carrying the same
+  // post-level like count, because that is the only like count the post has.
+  // Adding them row by row charged @sterredegoedex's 2.179 likes five times.
+  // The first row wins; they are identical on the fields summed here.
+  const byPost = new Map<string, CampaignRow>()
   const accounts = new Set<string>()
+  for (const r of hits) {
+    accounts.add(accountOf(r))
+    if (!byPost.has(r.postKey)) byPost.set(r.postKey, r)
+  }
+
   const ttAccounts = new Set<string>()
   let tiktokViews = 0, tiktokVideos = 0, postLikes = 0, likedPosts = 0, storyHits = 0
+  let views = 0, viewedOn = 0, likes = 0, likedOn = 0
+  let comments = 0, commentedOn = 0, shares = 0, sharedOn = 0, saves = 0, savedOn = 0
+  let ttInteractions = 0
 
-  for (const r of hits) {
-    posts.add(r.postKey)
-    accounts.add(accountOf(r))
+  for (const r of byPost.values()) {
+    // Cross-platform, same event. Null is skipped rather than added as 0, so a
+    // surface that publishes nothing lowers neither the total nor the count.
+    if (r.views != null) { views += r.views; viewedOn += 1 }
+    if (r.likes != null) { likes += r.likes; likedOn += 1 }
+    if (r.comments != null) { comments += r.comments; commentedOn += 1 }
+    if (r.shares != null) { shares += r.shares; sharedOn += 1 }
+    if (r.saves != null) { saves += r.saves; savedOn += 1 }
     if (r.surface === 'tiktok') {
       ttAccounts.add(accountOf(r))
       if (r.views != null) { tiktokViews += r.views; tiktokVideos += 1 }
+      ttInteractions += (r.likes ?? 0) + (r.comments ?? 0) + (r.shares ?? 0)
     }
     if (r.surface === 'post' && r.likes != null) { postLikes += r.likes; likedPosts += 1 }
     if (r.surface === 'story') storyHits += 1
@@ -283,8 +357,12 @@ export function hitTotals(
   const known = [...ttAccounts].filter((h) => followers.get(h) != null)
   return {
     hits: hits.length,
-    posts: posts.size,
+    posts: byPost.size,
     accounts: accounts.size,
+    views, viewedOn, likes, likedOn, comments, commentedOn,
+    shares, sharedOn, saves, savedOn,
+    tiktokInteractions: ttInteractions,
+    engagementRate: tiktokViews > 0 ? (ttInteractions / tiktokViews) * 100 : null,
     tiktokViews, tiktokVideos, postLikes, likedPosts, storyHits,
     tiktokFollowers: known.reduce((s, h) => s + (followers.get(h) ?? 0), 0),
     tiktokFollowersKnownFor: known.length,
@@ -301,7 +379,7 @@ export function hitTotals(
  *  22 dashes under it. */
 export function liveColumns(rows: CampaignRow[]): HitColumn[] {
   return HIT_COLUMNS.filter((c) => {
-    if (!c.numeric) return true
+    if (!c.numeric && !c.hideWhenEmpty) return true
     return rows.some((r) => hitValue(r, c.key) != null)
   })
 }

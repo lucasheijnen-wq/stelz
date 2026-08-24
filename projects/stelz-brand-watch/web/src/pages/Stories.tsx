@@ -11,7 +11,7 @@
 // See lib/storyStats.ts for the full reasoning.
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { PageShell, Card, Badge } from '../components/ui'
 import { MediaTile } from '../components/MediaTile'
 import { StackedDayBars, bucketByDay, type Series } from '../components/Chart'
@@ -52,11 +52,6 @@ const VERDICT_TONE: Record<StoryVerdict, string> = {
   absent: 'bg-[var(--color-ink)]/70 text-white',
   unanalysed: 'bg-[var(--color-ink-subtle)] text-white',
   rejected: 'bg-[var(--color-bad)] text-white',
-}
-
-export default function Stories() {
-  const [params, setParams] = useSearchParams()
-  return <StoriesView projectId={params.get('p')} params={params} setParams={setParams} />
 }
 
 /**

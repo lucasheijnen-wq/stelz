@@ -77,3 +77,25 @@ describe('?bron became ?tab', () => {
     expect(go('/lowlands', '?bron=discovery')).toContain('bron=discovery')
   })
 })
+
+describe('/stories', () => {
+  it('lands on the Stories tab of the default event', () => {
+    expect(go('/stories', '')).toBe('/evenementen/lowlands-2026?tab=stories')
+  })
+
+  it('keeps the preview switch, which is the only way to open the fixture', () => {
+    // There is no link to ?preview=stories in a production build, so the
+    // bookmark IS the entry point. A redirect that dropped it would look like
+    // the page lost its contents rather than moved.
+    const out = go('/stories', '?preview=stories')
+    expect(out).toContain('preview=stories')
+    expect(out).toContain('tab=stories')
+  })
+
+  it('overrides a tab the old route could not have meant', () => {
+    // /stories showed one surface and nothing else, so ?tab= on it was never
+    // meaningful. Landing anywhere but the Stories tab would lose the surface
+    // the bookmark was about.
+    expect(go('/stories', '?tab=roster')).toContain('tab=stories')
+  })
+})

@@ -37,6 +37,10 @@ function storyPreview() {
     '/preview-story-posts.json': path.join(STORIES, 'preview-story-posts.json'),
     '/preview-campaign.json': path.join(tmp, 'preview-campaign.json'),
     '/preview-campaign-detections.json': path.join(tmp, 'preview-campaign-detections.json'),
+    // The audience layer — 76_audience.py, read from raw payloads already on
+    // disk. Same serve-only path as the rest: it names real people who
+    // commented on public posts and has no business in a build.
+    '/preview-audience.json': path.join(tmp, 'preview-audience.json'),
   }
   // Media lives at .tmp/events/<event>/<kind>/media/<file>, so a URL names TWO
   // directories. Resolving that safely is preview-paths.ts, which is a pure

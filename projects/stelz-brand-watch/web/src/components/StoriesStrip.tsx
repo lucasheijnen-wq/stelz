@@ -50,7 +50,13 @@ export function StoriesStrip({
   /** Rows came from a local fixture, not Firestore. Must be stated, not implied. */
   preview?: boolean
   /** Where "alle stories" goes. A campaign passes its own scoped link so the
-   *  full page opens on the same set the strip was showing. */
+   *  full page opens on the same set the strip was showing.
+   *
+   *  The default stays '/stories' on purpose even though that route now
+   *  redirects: it is the one festival-agnostic name for this surface, and
+   *  ABSORBED_ROUTES sends it to the default event's Stories tab. Hard-coding
+   *  '/evenementen/lowlands-2026' here would put one festival's name back into
+   *  a generic component, which is the thing that route removal just undid. */
   storiesHref?: string
 }) {
   const [onlyHits, setOnlyHits] = useState(false)

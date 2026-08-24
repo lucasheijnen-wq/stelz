@@ -28,12 +28,15 @@ import { SurfaceCard } from '../components/campaign/SurfaceCard'
 import { ContentCard } from '../components/campaign/ContentCard'
 import { CreatorTable } from '../components/campaign/CreatorTable'
 import { NumbersTab } from '../components/campaign/NumbersTab'
+import { AudienceTab } from '../components/campaign/AudienceTab'
+import { CampaignHeader } from '../components/campaign/CampaignHeader'
 import {
   joinCampaign, campaignRollup, stelzShare,
   SURFACE_LABEL, SURFACES,
   type CampaignRow, type Surface, type CampaignItem,
 } from '../lib/campaign'
 import { isStelzStory } from '../lib/storyStats'
+import { stelzHits, hitTotals, followerIndex } from '../lib/hits'
 import { getEvent, type StelzEvent } from '../data/events'
 import {
   matchEvent, eventWindow, formatWindow, eventStatus, seedTsv,
@@ -43,9 +46,9 @@ import { fetchProjects, projectsAction, type Project } from '../lib/data'
 import { useMembership } from '../lib/membership'
 import type { DetectionRow } from '../lib/types'
 import { fmtNum, compactNum } from '../lib/format'
-import { useCampaignPreview, useCampaignDetectionsPreview } from '../lib/devPreview'
+import { useCampaignPreview, useCampaignDetectionsPreview, useAudiencePreview } from '../lib/devPreview'
 
-type Tab = 'roster' | 'discovery' | 'cijfers' | 'stories' | 'settings'
+type Tab = 'roster' | 'discovery' | 'cijfers' | 'publiek' | 'stories' | 'settings'
 
 const TABS: { id: Tab; label: string; sub: string }[] = [
   { id: 'roster', label: 'Roster', sub: 'wat de geboekte creators plaatsten' },
@@ -56,6 +59,10 @@ const TABS: { id: Tab; label: string; sub: string }[] = [
   // wants them beside each other, so this tab answers it with a Bron column
   // keeping every row attributable.
   { id: 'cijfers', label: 'Cijfers', sub: 'alle treffers met hun cijfers' },
+  // Not posts but PEOPLE: who comments, who gets tagged, who was at the
+  // festival posting on their own account. Its own tab because the rows are a
+  // different kind of thing and carry different denominators.
+  { id: 'publiek', label: 'Publiek', sub: 'de mensen eromheen' },
   { id: 'stories', label: 'Stories', sub: 'de 24-uurs laag' },
   { id: 'settings', label: 'Instellingen', sub: 'roster, periode, hashtags' },
 ]
@@ -102,6 +109,7 @@ function EventBody({ ev, params, setParams }: {
 
   const previewItems = useCampaignPreview()
   const previewDetections = useCampaignDetectionsPreview()
+  const audience = useAudiencePreview()
 
   useEffect(() => {
     let cancelled = false
@@ -168,6 +176,12 @@ function EventBody({ ev, params, setParams }: {
     return campaignRollup(scopeRows.filter((r) => r.source === tab), profiles,
                           tab === 'roster' ? roster : [])
   }, [scopeRows, profiles, roster, rollup, tab])
+
+  // The header's six figures, from the same hitTotals the Cijfers tab uses.
+  // A header that did its own arithmetic would eventually disagree with the
+  // table below it, and it would do so in front of the client.
+  const headerTotals = useMemo(
+    () => hitTotals(stelzHits(scopeRows), followerIndex(scopeRows)), [scopeRows])
 
   const shown = useMemo(() => {
     // Stëlz only. A roster item without the can is still counted — it is in
@@ -249,6 +263,12 @@ function EventBody({ ev, params, setParams }: {
         )}
       </Card>
 
+      {/* ABOVE THE TABS, ON PURPOSE. "How is Stëlz doing on social" is not a
+          question about the roster tab or the discovery tab — it is what the
+          page as a whole answers, and an answer that only appears once you pick
+          the right tab is one most readers never reach. */}
+      {allRows.length > 0 && <CampaignHeader totals={headerTotals} />}
+
       <div className="flex flex-wrap gap-2 mb-4">
         {TABS.map((t) => {
           const st = t.id === 'roster' || t.id === 'discovery' ? rollup.bySource[t.id] : null
@@ -294,6 +314,8 @@ function EventBody({ ev, params, setParams }: {
         }} />
       ) : allRows.length === 0 ? (
         <EmptyState ev={ev} />
+      ) : tab === 'publiek' ? (
+        <AudienceTab audience={audience} />
       ) : tab === 'cijfers' ? (
         <NumbersTab
           rows={scopeRows}

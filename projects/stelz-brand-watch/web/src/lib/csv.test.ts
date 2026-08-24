@@ -78,7 +78,7 @@ describe('campaignCsv', () => {
       url: 'https://tiktok.com/@anna/video/1', coverUrl: null, videoUrl: null,
       mediaType: 'video', postedAt: '2026-08-22T12:00:00Z', caption: null,
       hashtags: [], mentions: [], videoDuration: null,
-      views: 194_300, likes: 7_674, comments: 31, shares: 0, pollVotes: null,
+      views: 194_300, likes: 7_674, comments: 31, shares: 0, saves: 42, pollVotes: null,
       isPaidPartnership: false,
     },
     {
@@ -86,7 +86,7 @@ describe('campaignCsv', () => {
       url: null, coverUrl: null, videoUrl: null,
       mediaType: 'image', postedAt: '2026-08-20T12:00:00Z', caption: null,
       hashtags: [], mentions: [], videoDuration: null,
-      views: null, likes: null, comments: null, shares: null, pollVotes: null,
+      views: null, likes: null, comments: null, shares: null, saves: null, pollVotes: null,
       isPaidPartnership: false,
     },
   ], [row({ post_id: 'tt' }), row({ post_id: 'st', detection_id: 'd2' })])
@@ -119,7 +119,7 @@ describe('campaignCsv', () => {
       url: null, coverUrl: null, videoUrl: null, mediaType: 'image',
       postedAt: '2026-08-20T12:00:00Z', caption: null, hashtags: [], mentions: [],
       videoDuration: null, views: null, likes: 1, comments: null, shares: null,
-      pollVotes: null, isPaidPartnership: false,
+      saves: null, pollVotes: null, isPaidPartnership: false,
     }], [row({ post_id: 'x', context: '=HYPERLINK("http://x","klik")' })])
     expect(campaignCsv(rows)).toContain(`"'=HYPERLINK`)
   })

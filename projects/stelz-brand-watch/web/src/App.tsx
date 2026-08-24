@@ -8,7 +8,6 @@ import { useAuth } from './lib/auth'
 import Home from './pages/Home'
 import Creator from './pages/Creator'
 import Sounds from './pages/Sounds'
-import StoriesPage from './pages/Stories'
 import { useMembership } from './lib/membership'
 import { ABSORBED_ROUTES, absorbedTarget, type AbsorbedRoute } from './lib/absorbedRoutes'
 import Costs from './pages/Costs'
@@ -48,7 +47,9 @@ const NAV: { to: string; label: string; matchPrefix?: string; adminOnly?: boolea
   // "Campagne" was the same three surfaces with no event attached — so the
   // event page is both.
   { to: '/evenementen', label: 'Evenementen', matchPrefix: '/evenementen' },
-  { to: '/stories', label: 'Stories', matchPrefix: '/stories' },
+  // Stories was a third tab for one surface of one event. It is now a tab
+  // INSIDE that event, where it has a period and a roster split — see
+  // ABSORBED_ROUTES. /stories still resolves; it just lands there.
   { to: '/sounds', label: 'Sounds', matchPrefix: '/sounds' },
   { to: '/kosten', label: 'Kosten', matchPrefix: '/kosten', adminOnly: true },
   { to: '/settings', label: 'Settings' },
@@ -97,7 +98,6 @@ export default function App() {
       <Route element={<RequireAuth><AppLayout /></RequireAuth>}>
         <Route path="/" element={<Home />} />
         <Route path="/creators/:handle" element={<Creator />} />
-        <Route path="/stories" element={<StoriesPage />} />
         <Route path="/kosten" element={<Costs />} />
         <Route path="/sounds" element={<Sounds />} />
         <Route path="/sounds/:soundKey" element={<Sounds />} />

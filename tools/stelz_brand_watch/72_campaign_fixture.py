@@ -204,6 +204,11 @@ def to_item(e: dict, v: dict | None, event_id: str, kind: str, surface: str,
         "likes": e.get("digg_count") if surface == "tiktok" else e.get("likes_count"),
         "comments": e.get("comment_count") if surface == "tiktok" else e.get("comments_count"),
         "shares": e.get("share_count") if surface == "tiktok" else None,
+        # Saves. TikTok's strongest intent signal — a like costs nothing and a
+        # save means "I want this back" — and it has been in the archive since
+        # the first harvest without ever reaching a screen. Instagram publishes
+        # no equivalent, so it is None there rather than 0.
+        "saves": e.get("collect_count") if surface == "tiktok" else None,
         "pollVotes": e.get("poll_votes") if surface == "story" else None,
         "isPaidPartnership": bool(e.get("is_ad") or e.get("is_sponsored")
                                   or e.get("is_paid_partnership")),

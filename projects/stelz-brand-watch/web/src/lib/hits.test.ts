@@ -18,7 +18,7 @@ const item = (over: Partial<CampaignItem> & { itemId: string; creatorHandle: str
   platform: 'instagram', surface: 'story', url: null, coverUrl: null, videoUrl: null,
   mediaType: 'image', postedAt: '2026-08-20T10:00:00Z', caption: null,
   hashtags: [], mentions: [], videoDuration: null,
-  views: null, likes: null, comments: null, shares: null, pollVotes: null,
+  views: null, likes: null, comments: null, shares: null, saves: null, pollVotes: null,
   isPaidPartnership: false, ...over,
 })
 
@@ -164,6 +164,32 @@ describe('de kopcijfers', () => {
     expect(t.accounts).toBe(1)
   })
 
+  it('rekent de cijfers van een carrousel één keer, niet één keer per dia', () => {
+    // DE ECHTE FOUT, met de echte cijfers. Het blikje stond op vijf dia's van
+    // @sterredegoedex' carrousel; elke dia draagt hetzelfde post-getal van 2.179
+    // likes, want dat is het enige likegetal dat de post heeft. Per rij optellen
+    // maakte er 10.895 van, en over alle treffers 48.919 waar 38.758 waar was.
+    const slide = (n: number) => item({
+      itemId: `s${n}`, creatorHandle: 'sterredegoedex', platformHandle: 'sterredegoedex',
+      postKey: 'DcV-Z_SDRwM', slot: n, slots: 10,
+      surface: 'post', platform: 'instagram', likes: 2_179, comments: 31,
+    })
+    const rows = joinCampaign(
+      [1, 2, 3, 4, 5].map(slide),
+      [1, 2, 3, 4, 5].map((n) => det({ post_id: `s${n}` })),
+    )
+    const t = hitTotals(stelzHits(rows))
+    expect(t.hits).toBe(5)
+    expect(t.posts).toBe(1)
+    expect(t.likes).toBe(2_179)
+    expect(t.comments).toBe(31)
+    // De dekking telt posts, niet dia's — anders deelt de tegel een getal per
+    // post door een aantal dia's.
+    expect(t.likedOn).toBe(1)
+    expect(t.commentedOn).toBe(1)
+    expect(Object.values(t)).not.toContain(10_895)
+  })
+
   it('noemt wie geen volgersaantal prijsgeeft in plaats van hem als 0 te tellen', () => {
     const tt = { surface: 'tiktok', platform: 'tiktok' } as const
     const rows = joinCampaign([
@@ -271,8 +297,34 @@ describe('de legenda en de kolommen', () => {
     const keys = liveColumns(alleenStories).map((c) => c.key)
     expect(keys).not.toContain('views')
     expect(keys).not.toContain('shares')
+    expect(keys).not.toContain('slide')          // niets hier is een carrousel
     expect(keys).toContain('handle')             // niet-numerieke kolommen blijven
     expect(keys).toContain('visibility')
+  })
+
+  it('noemt de dia zodra er een carrousel in beeld is', () => {
+    // Zonder deze kolom staan er vijf rijen met precies dezelfde 2.179 likes en
+    // niets dat zegt dat het één post is. In het bestand dat de klant opent is
+    // dat het verschil tussen kloppen en 147% ernaast zitten.
+    const rows = joinCampaign([
+      item({ itemId: 'c1', creatorHandle: 'a', platformHandle: 'a', postKey: 'ABC',
+             slot: 2, slots: 10, surface: 'post', likes: 2_179 }),
+      item({ itemId: 'c2', creatorHandle: 'a', platformHandle: 'a', postKey: 'ABC',
+             slot: 6, slots: 10, surface: 'post', likes: 2_179 }),
+    ], [det({ post_id: 'c1' }), det({ post_id: 'c2' })])
+
+    expect(liveColumns(rows).map((c) => c.key)).toContain('slide')
+    expect(hitValue(rows[0], 'slide')).toBe('3/10')   // slot is 0-gebaseerd
+    expect(hitValue(rows[1], 'slide')).toBe('7/10')
+  })
+
+  it('laat de dia leeg voor alles wat geen carrousel is', () => {
+    // "1/1" op een TikTok zou suggereren dat er meer dia's konden zijn.
+    const tt = joinCampaign(
+      [item({ itemId: 't', creatorHandle: 'a', surface: 'tiktok', slot: 0, slots: 1 })],
+      [det({ post_id: 't' })])
+    expect(hitValue(tt[0], 'slide')).toBeNull()
+    expect(hitText(tt[0], 'slide')).toBe('—')
   })
 
   it('houdt elke kolom sorteerbaar', () => {

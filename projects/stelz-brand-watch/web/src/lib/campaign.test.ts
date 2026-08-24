@@ -15,7 +15,7 @@ const item = (over: Partial<CampaignItem> & { itemId: string; creatorHandle: str
   platform: 'instagram', surface: 'story', url: null, coverUrl: null, videoUrl: null,
   mediaType: 'image', postedAt: '2026-08-20T10:00:00Z', caption: null,
   hashtags: [], mentions: [], videoDuration: null,
-  views: null, likes: null, comments: null, shares: null, pollVotes: null,
+  views: null, likes: null, comments: null, shares: null, saves: null, pollVotes: null,
   isPaidPartnership: false, ...over,
 })
 
@@ -377,6 +377,25 @@ describe('carousels are one post, not ten', () => {
       expect(r.bySurface[s].postsWithStelz).toBeLessThanOrEqual(r.bySurface[s].posts)
       expect(r.bySurface[s].posts).toBeLessThanOrEqual(r.bySurface[s].items)
     }
+  })
+
+  it('counts a post\'s likes once, not once per slide', () => {
+    // THE SAME MISTAKE ONE LEVEL DOWN. Slides are counted as items on purpose —
+    // each is an image to judge — but every slide carries the SAME post-level
+    // like count, because that is the only like count the post has. Adding it
+    // per row reported 254.589 post likes on the real Lowlands set where
+    // 103.007 was true, off by 147% on a figure a client reads first.
+    const liked = joinCampaign(
+      [0, 1, 2].map((n) => ({ ...slide(n), likes: 2_179 })),
+      [det({ post_id: 'instagram_postABCs1', detected: true, confidence: 0.95 })],
+    )
+    const r = campaignRollup(liked, {}, ['lize'])
+    expect(r.items).toBe(3)
+    expect(r.posts).toBe(1)
+    expect(r.postLikes).toBe(2_179)
+    expect(r.bySurface.post.metric).toBe(2_179)
+    expect(r.creators[0].bySurface.post.metric).toBe(2_179)
+    expect(Object.values(r)).not.toContain(6_537)
   })
 
   it('keeps two people apart when their shortcodes collide', () => {
