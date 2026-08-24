@@ -216,13 +216,21 @@ def accounts(ev: dict, roster: set[str]) -> tuple[list[dict], dict]:
     and says so.
     """
     seen: dict[str, dict] = {}
-    for kind, source in (("tiktok", "roster"), ("discovery", "discovery")):
+    for kind in ("tiktok", "discovery"):
         hits = hit_ids(ev, kind)
         for p in read_raw(ev, kind):
             a = p.get("authorMeta") or {}
             h = (a.get("name") or "").lower()
             if not h:
                 continue
+            # BY MEMBERSHIP, NOT BY ARCHIVE. The tiktok archive used to imply
+            # "roster", which was true only as long as nothing but the roster
+            # was ever profile-scraped. The hunt for more Lowlands content
+            # scrapes festival-goers' profiles into that same archive — and a
+            # festival-goer shown as "geboekt" on the Publiek tab would move
+            # organic reach into the bought column, on the tab whose whole
+            # point is keeping those apart.
+            source = "roster" if h in roster else "discovery"
             r = seen.setdefault(h, {
                 "handle": h,
                 "platform": "tiktok",
@@ -237,9 +245,9 @@ def accounts(ev: dict, roster: set[str]) -> tuple[list[dict], dict]:
                 "posts": 0,
                 "withStelz": 0,
             })
-            # A roster creator also picked up by hashtag search stays roster.
-            if source == "roster":
-                r["source"] = "roster"
+            # Membership is a property of the handle, so every occurrence of
+            # the same account computes the same source — no re-assert needed
+            # the way the archive-based labelling used to.
             r["posts"] += 1
             if str(p.get("id")) in hits:
                 r["withStelz"] += 1

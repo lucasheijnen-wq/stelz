@@ -31,7 +31,7 @@ import {
   type CampaignRow,
 } from '../lib/campaign'
 import { followerIndex, hitTotals, stelzHits } from '../lib/hits'
-import { bookingFor, formatWindow, matchEvent } from '../lib/events'
+import { bookingFor, evidencedHandlesFor, formatWindow, matchEvent } from '../lib/events'
 import { EVENTS } from '../data/events'
 import { compactNum, fmtDate, fmtNum } from '../lib/format'
 import { useResetOn } from '../lib/useResetOn'
@@ -112,10 +112,15 @@ export default function Creator() {
   const eventRows = useMemo(() => {
     const events = booking ? [booking.event] : EVENTS
     const out: CampaignRow[] = []
-    for (const r of mine) {
-      for (const ev of events) {
-        const m = matchEvent(ev, r)
-        if (m) { out.push({ ...r, source: m.source, foundVia: r.foundVia ?? m.foundVia }); break }
+    for (const ev of events) {
+      // Bewijs over déze rijen is genoeg: evidencedHandlesFor kijkt per account,
+      // en alle rijen van dit account zitten in `mine` — dezelfde uitkomst als
+      // de evenementpagina die over alle rijen rekent.
+      const evidenced = evidencedHandlesFor(ev, mine)
+      for (const r of mine) {
+        if (out.some((o) => o.itemId === r.itemId)) continue
+        const m = matchEvent(ev, r, evidenced)
+        if (m) out.push({ ...r, source: m.source, foundVia: r.foundVia ?? m.foundVia })
       }
     }
     return out

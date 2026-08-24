@@ -10,7 +10,7 @@
 //                    bought reach into organic reach.
 import { describe, expect, it } from 'vitest'
 import {
-  matchEvent, eventWindow, inWindow, eventStatus, rosterAccounts, identityMap,
+  matchEvent, evidencedHandlesFor, eventWindow, inWindow, eventStatus, rosterAccounts, identityMap,
   nameMap, orderedTags, formatWindow, bookingFor, type Attributable,
 } from './events'
 import { EVENTS, getEvent, type StelzEvent } from '../data/events'
@@ -178,6 +178,64 @@ describe('matchEvent', () => {
     const firstEvent = Math.min(...LL.hashtags.filter((h) => h.family === 'event')
       .map((h) => ordered.indexOf(h.tag)))
     expect(lastBrand).toBeLessThan(firstEvent)
+  })
+})
+
+describe('account evidence: één getagde clip bewijst het weekend', () => {
+  // Een festivalganger tagt #lowlands op één clip en niet op de andere vier
+  // van dezelfde camping. De getagde bewijst het weekend; de ongetagde rijden
+  // op dat bewijs mee — maar alléén binnen het venster, en alléén als de
+  // aanroeper de bewijsset meegeeft.
+  const tagged = item({ platformHandle: 'camperaar', hashtags: ['lowlands'] })
+  const untagged = item({ platformHandle: 'camperaar', hashtags: ['ochtendkoffie'] })
+
+  it('telt een ongetagde in-venster post van een bewezen account als discovery', () => {
+    const evidence = evidencedHandlesFor(LL, [tagged, untagged])
+    expect(evidence.has('camperaar')).toBe(true)
+    expect(matchEvent(LL, untagged, evidence))
+      .toEqual({ eventId: 'lowlands-2026', source: 'discovery', foundVia: 'profiel' })
+  })
+
+  it('verandert NIETS zonder bewijsset — het oude gedrag is de default', () => {
+    expect(matchEvent(LL, untagged)).toBeNull()
+  })
+
+  it('laat de tag op een getagde post winnen van het accountbewijs', () => {
+    // 'profiel' zou verhullen hoe de rij gevonden is; de tag is specifieker.
+    const evidence = evidencedHandlesFor(LL, [tagged, untagged])
+    expect(matchEvent(LL, tagged, evidence)?.foundVia).toBe('lowlands')
+  })
+
+  it('trekt geen oude content binnen: het venster blijft eerst', () => {
+    const evidence = evidencedHandlesFor(LL, [tagged])
+    expect(matchEvent(LL, { ...untagged, postedAt: '2025-08-21T12:00:00Z' }, evidence))
+      .toBeNull()
+    expect(matchEvent(LL, { ...untagged, postedAt: null }, evidence)).toBeNull()
+  })
+
+  it('geeft geen bewijs op een post die buiten het venster ligt', () => {
+    // De getagde clip is van vorig jaar: geen bewijs voor dít evenement.
+    const oldTagged = { ...tagged, postedAt: '2025-08-21T12:00:00Z' }
+    expect(evidencedHandlesFor(LL, [oldTagged, untagged]).size).toBe(0)
+  })
+
+  it('geeft rosterleden geen bewijsstatus — die zijn al roster', () => {
+    const rosterTagged = item({ creatorHandle: 'brittmessing', hashtags: ['lowlands'] })
+    expect(evidencedHandlesFor(LL, [rosterTagged]).size).toBe(0)
+  })
+
+  it('accepteert de vastgelegde zoektag als bewijs, ook zonder caption-tag', () => {
+    // 82 van 176 discovery-rijen dragen geen event-tag in hun caption; de
+    // harvest legde de zoektag vast in foundVia. Dat is bewijs.
+    const viaSearch = item({ platformHandle: 'camperaar', foundVia: 'lowlands2026' })
+    expect(evidencedHandlesFor(LL, [viaSearch]).has('camperaar')).toBe(true)
+  })
+
+  it("gebruikt 'profiel' zelf nooit als bewijs — bewijs mag niet composteren", () => {
+    // Anders wordt de uitvoer van ronde 1 het bewijs van ronde 2, en groeit de
+    // set zonder dat er ooit een echte tag aan te pas kwam.
+    const viaProfile = item({ platformHandle: 'camperaar', foundVia: 'profiel' })
+    expect(evidencedHandlesFor(LL, [viaProfile]).size).toBe(0)
   })
 })
 

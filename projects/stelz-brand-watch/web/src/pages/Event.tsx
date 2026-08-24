@@ -39,7 +39,7 @@ import { isStelzStory } from '../lib/storyStats'
 import { stelzHits, hitTotals, followerIndex } from '../lib/hits'
 import { getEvent, type StelzEvent } from '../data/events'
 import {
-  matchEvent, eventWindow, formatWindow, eventStatus, seedTsv,
+  matchEvent, evidencedHandlesFor, eventWindow, formatWindow, eventStatus, seedTsv,
 } from '../lib/events'
 import { fbFetchCreatorProfiles, type CreatorProfile } from '../lib/firestore'
 import { fetchProjects, projectsAction, type Project } from '../lib/data'
@@ -151,10 +151,16 @@ function EventBody({ ev, params, setParams }: {
   // whether a row belongs to this event and on which side of the split it
   // falls, so the source label the fixture happened to bake in never overrides
   // the roster and the window.
+  //
+  // With ACCOUNT EVIDENCE: a festival-goer whose tagged clip proved the
+  // weekend gets their untagged in-window clips counted too (foundVia
+  // 'profiel'). Both halves — granting evidence and spending it — live in
+  // lib/events, so this component only connects them.
   const rows = useMemo(() => {
+    const evidenced = evidencedHandlesFor(ev, allRows)
     const out: CampaignRow[] = []
     for (const r of allRows) {
-      const m = matchEvent(ev, r)
+      const m = matchEvent(ev, r, evidenced)
       if (m) out.push({ ...r, source: m.source, foundVia: r.foundVia ?? m.foundVia })
     }
     return out

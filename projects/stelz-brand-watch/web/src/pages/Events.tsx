@@ -17,7 +17,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Card, PageShell } from '../components/ui'
 import { EVENTS, type StelzEvent } from '../data/events'
-import { eventStatus, formatWindow, matchEvent } from '../lib/events'
+import { eventStatus, evidencedHandlesFor, formatWindow, matchEvent } from '../lib/events'
 import { joinCampaign, type CampaignItem, type CampaignRow } from '../lib/campaign'
 import { isStelzStory } from '../lib/storyStats'
 import { fetchProjects, type Project } from '../lib/data'
@@ -95,8 +95,11 @@ function EventRow({ ev, rows, project }: {
   // detail page come to disagree about the same festival.
   const stats = useMemo(() => {
     let roster = 0, discovery = 0, hits = 0
+    // Same account-evidence set as the detail page, or the two disagree the
+    // moment a festival-goer's untagged clip counts there and not here.
+    const evidenced = evidencedHandlesFor(ev, rows)
     for (const r of rows) {
-      const m = matchEvent(ev, r)
+      const m = matchEvent(ev, r, evidenced)
       if (!m) continue
       if (m.source === 'roster') roster += 1
       else discovery += 1
