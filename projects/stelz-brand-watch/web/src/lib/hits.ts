@@ -371,6 +371,42 @@ export function hitTotals(
   }
 }
 
+/**
+ * One representative sighting per POST, for a grid of tiles.
+ *
+ * The rows are sightings, and a carousel with the can on eight slides is eight
+ * of them. A grid that draws every sighting shows the same post eight times
+ * over — which reads as duplicated data, not as thoroughness. The best sighting
+ * fronts the post ('visible' beats 'small', then confidence, then slide order
+ * so the choice is stable), and `moreSlides` says how many were folded in so
+ * the card can wear it as a badge instead of hiding it. Newest first, because
+ * every grid that renders this sorts that way.
+ *
+ * The Cijfers table deliberately does NOT use this: there the per-sighting rows
+ * are the point, and its Dia column is what keeps them legible.
+ */
+export function groupHitsByPost(
+  hits: CampaignRow[],
+): { row: CampaignRow; moreSlides: number }[] {
+  const rank = (r: CampaignRow) =>
+    (r.verdict === 'visible' ? 0 : 1) * 1000 - (r.confidence ?? 0)
+  const byPost = new Map<string, { row: CampaignRow; moreSlides: number }>()
+  for (const r of hits) {
+    const cur = byPost.get(r.postKey)
+    if (!cur) byPost.set(r.postKey, { row: r, moreSlides: 0 })
+    else {
+      cur.moreSlides += 1
+      if (rank(r) < rank(cur.row)
+        || (rank(r) === rank(cur.row) && (r.slot ?? 0) < (cur.row.slot ?? 0))) {
+        cur.row = r
+      }
+    }
+  }
+  return [...byPost.values()].sort(
+    (a, b) => (b.row.postedAt ?? '').localeCompare(a.row.postedAt ?? '')
+      || a.row.itemId.localeCompare(b.row.itemId))
+}
+
 /** Which metric columns hold at least one real number in this set.
  *
  *  A column that is empty for every row in view is worse than useless: it

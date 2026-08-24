@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   HIT_COLUMNS, hitValue, hitText, sortHits, stelzHits, metricLegend, liveColumns,
-  hitTotals, bucketByRange, followerIndex,
+  hitTotals, bucketByRange, followerIndex, groupHitsByPost,
 } from './hits'
 import { joinCampaign, type CampaignItem } from './campaign'
 import type { DetectionRow } from './types'
@@ -333,5 +333,63 @@ describe('de legenda en de kolommen', () => {
       expect(() => sortHits(rows, c.key, 'asc')).not.toThrow()
       expect(sortHits(rows, c.key, 'asc')).toHaveLength(rows.length)
     }
+  })
+})
+
+// Waarom dit een aparte functie is: de grid tekende elke WAARNEMING als eigen
+// kaart, dus een carrousel met het blikje op acht dia's stond acht keer
+// vrijwel identiek op de pagina — wat leest als dubbele data, niet als
+// grondigheid. Eén kaart per post, met de beste waarneming voorop en de rest
+// als badge. De Cijfers-tabel blijft bewust per waarneming (de Dia-kolom
+// maakt dat daar leesbaar).
+describe('één kaart per post', () => {
+  const carousel = () => joinCampaign([
+    item({ itemId: 'c_s0', creatorHandle: 'anna', surface: 'post',
+           postKey: 'CAROUSEL', slot: 0, slots: 8, postedAt: '2026-08-21T12:00:00Z' }),
+    item({ itemId: 'c_s3', creatorHandle: 'anna', surface: 'post',
+           postKey: 'CAROUSEL', slot: 3, slots: 8, postedAt: '2026-08-21T12:00:00Z' }),
+    item({ itemId: 'c_s7', creatorHandle: 'anna', surface: 'post',
+           postKey: 'CAROUSEL', slot: 7, slots: 8, postedAt: '2026-08-21T12:00:00Z' }),
+    item({ itemId: 'los', creatorHandle: 'bram', surface: 'tiktok', platform: 'tiktok',
+           postedAt: '2026-08-22T12:00:00Z' }),
+  ], [
+    det({ post_id: 'c_s0', size_in_frame: 'small', is_primary_subject: false, confidence: 0.6 }),
+    det({ post_id: 'c_s3', confidence: 0.95 }),
+    det({ post_id: 'c_s7', confidence: 0.8 }),
+    det({ post_id: 'los', confidence: 0.9 }),
+  ])
+
+  it('vouwt dia-waarnemingen samen tot één kaart met een teller', () => {
+    const grouped = groupHitsByPost(stelzHits(carousel()))
+    expect(grouped).toHaveLength(2)
+    const anna = grouped.find((g) => g.row.creatorHandle === 'anna')!
+    expect(anna.moreSlides).toBe(2)
+    const bram = grouped.find((g) => g.row.creatorHandle === 'bram')!
+    expect(bram.moreSlides).toBe(0)
+  })
+
+  it("zet de beste waarneming voorop: 'visible' boven 'small', dan confidence", () => {
+    const anna = groupHitsByPost(stelzHits(carousel()))
+      .find((g) => g.row.creatorHandle === 'anna')!
+    // s0 is 'small' (klein in beeld), s3 en s7 zijn 'visible'; s3 heeft de
+    // hoogste confidence en moet dus de kaart worden.
+    expect(anna.row.itemId).toBe('c_s3')
+    expect(anna.row.verdict).toBe('visible')
+  })
+
+  it('sorteert nieuwste eerst, net als de grids die dit tekenen', () => {
+    const grouped = groupHitsByPost(stelzHits(carousel()))
+    expect(grouped.map((g) => g.row.creatorHandle)).toEqual(['bram', 'anna'])
+  })
+
+  it('verliest geen posts: elke postKey uit de invoer komt terug', () => {
+    const hits = stelzHits(carousel())
+    const grouped = groupHitsByPost(hits)
+    expect(new Set(grouped.map((g) => g.row.postKey)))
+      .toEqual(new Set(hits.map((r) => r.postKey)))
+    // En de badge-tellingen sluiten op de invoer aan: kaarten + weggevouwen
+    // dia's zijn samen precies alle waarnemingen.
+    expect(grouped.length + grouped.reduce((s, g) => s + g.moreSlides, 0))
+      .toBe(hits.length)
   })
 })

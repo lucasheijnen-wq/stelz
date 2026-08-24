@@ -36,7 +36,7 @@ import {
   type CampaignRow, type Surface, type CampaignItem,
 } from '../lib/campaign'
 import { isStelzStory } from '../lib/storyStats'
-import { stelzHits, hitTotals, followerIndex } from '../lib/hits'
+import { stelzHits, hitTotals, followerIndex, groupHitsByPost } from '../lib/hits'
 import { getEvent, type StelzEvent } from '../data/events'
 import {
   matchEvent, evidencedHandlesFor, eventWindow, formatWindow, eventStatus, seedTsv,
@@ -196,7 +196,8 @@ function EventBody({ ev, params, setParams }: {
     let out = scopeRows.filter((r) => r.source === tab && isStelzStory(r.verdict))
     if (creator) out = out.filter((r) => r.creatorHandle === creator)
     if (surface) out = out.filter((r) => r.surface === surface)
-    return [...out].sort((a, b) => (b.postedAt ?? '').localeCompare(a.postedAt ?? ''))
+    // One card per POST, best sighting in front — see lib/hits.groupHitsByPost.
+    return groupHitsByPost(out)
   }, [scopeRows, tab, creator, surface])
 
   const setParam = (k: string, v: string | null) => {
@@ -455,7 +456,7 @@ function EventBody({ ev, params, setParams }: {
               >{SURFACE_LABEL[surface]} ✕</button>
             )}
             <span className="ml-auto text-[11px] text-[var(--color-ink-subtle)] tabular-nums">
-              {fmtNum(shown.length)} met Stëlz getoond
+              {fmtNum(shown.length)} post{shown.length === 1 ? '' : 's'} met Stëlz getoond
             </span>
           </div>
 
@@ -467,10 +468,11 @@ function EventBody({ ev, params, setParams }: {
             </Card>
           ) : (
             <div className="flex flex-wrap gap-2 mb-8">
-              {shown.slice(0, 240).map((r) => (
+              {shown.slice(0, 240).map(({ row: r, moreSlides }) => (
                 <ContentCard
                   key={`${r.surface}_${r.itemId}`}
                   row={r}
+                  moreSlides={moreSlides}
                   showTag={tab === 'discovery'}
                   onOpen={() => setOpen(r)}
                 />

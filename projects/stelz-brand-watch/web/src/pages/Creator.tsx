@@ -30,7 +30,7 @@ import {
   joinCampaign, campaignRollup, SURFACE_LABEL, SURFACES,
   type CampaignRow,
 } from '../lib/campaign'
-import { followerIndex, hitTotals, stelzHits } from '../lib/hits'
+import { followerIndex, groupHitsByPost, hitTotals, stelzHits } from '../lib/hits'
 import { bookingFor, evidencedHandlesFor, formatWindow, matchEvent } from '../lib/events'
 import { EVENTS } from '../data/events'
 import { compactNum, fmtDate, fmtNum } from '../lib/format'
@@ -330,10 +330,11 @@ export default function Creator() {
               </Card>
             ) : (
               <div className="flex flex-wrap gap-2">
-                {eventHits.map((r) => (
+                {groupHitsByPost(eventHits).map(({ row: r, moreSlides }) => (
                   <ContentCard
                     key={`${r.surface}_${r.itemId}`}
                     row={r}
+                    moreSlides={moreSlides}
                     showTag={r.source === 'discovery'}
                     onOpen={() => setOpenRow(r)}
                   />

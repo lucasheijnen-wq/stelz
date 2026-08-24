@@ -277,6 +277,70 @@ def to_detection(e: dict, v: dict, event_id: str, kind: str, surface: str,
     }
 
 
+def content_key(e: dict, surf: str, kind: str, raw_id: str) -> tuple:
+    """What makes two archive rows the SAME image or video.
+
+    Production keys a post document on its platform id, so the same clip found
+    twice — once via #stelz, once via the profile scrape of its poster — is one
+    document there and must be one row here. The archives cannot promise that:
+    70/71/73 each dedupe against their own index only, and the id TEXT differs
+    across them (discovery prefixes IG ids with "ig"), so identity comes from
+    the archive FIELDS, never from string surgery on ids.
+
+    A carousel slide is matched per slide: the can on slide 3 and the can on
+    slide 7 are two sightings of one post, and stay two rows. Stories are never
+    merged — only one archive holds them.
+    """
+    handle = (e.get("handle") or "").lower()
+    if surf == "tiktok":
+        return ("tt", handle, str(e.get("video_id") or raw_id))
+    if surf == "post" and e.get("short_code"):
+        return ("ig", handle, e["short_code"], e.get("slot"))
+    return ("uniq", kind, raw_id)
+
+
+# Filled from a duplicate onto its survivor when the survivor has None. The two
+# copies split the truth between them: the profile scrape carries the metrics,
+# the tag scrape carries found_via — merging must lose neither.
+FILL_FIELDS = (
+    "play_count", "digg_count", "comment_count", "share_count", "collect_count",
+    "likes_count", "comments_count", "views_count", "follower_count",
+    "scraped_for", "posted_at", "caption", "duration", "url",
+)
+
+
+def merge_group(grp: list[dict], kind_rank: dict[str, int]) -> dict:
+    """One candidate out of several archive copies of the same content.
+
+    Survivor: the copy whose verdict says Stëlz, else any judged copy, else
+    KINDS order — so a sighting is never traded for an unjudged twin. Grafted
+    onto it: found_via and the caption-hashtag union (both feed the account-
+    evidence rule in lib/events — dropping them would silently un-count every
+    untagged post that rode on this account's proof), plus any metric the
+    survivor is missing.
+    """
+    def rank(c: dict) -> tuple:
+        v = c["v"]
+        return (0 if (v and v.get("detected")) else 1 if v else 2,
+                kind_rank[c["kind"]])
+    survivor = min(grp, key=rank)
+    e = dict(survivor["e"])
+    for other in grp:
+        if other is survivor:
+            continue
+        oe = other["e"]
+        if not e.get("found_via") and oe.get("found_via"):
+            e["found_via"] = oe["found_via"]
+        have = {str(t).lower() for t in (e.get("hashtags") or [])}
+        extra = [t for t in (oe.get("hashtags") or []) if str(t).lower() not in have]
+        if extra:
+            e["hashtags"] = list(e.get("hashtags") or []) + extra
+        for f in FILL_FIELDS:
+            if e.get(f) is None and oe.get(f) is not None:
+                e[f] = oe[f]
+    return {**survivor, "e": e}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -290,6 +354,10 @@ def main() -> int:
     dets: list[dict] = []
     report: list[str] = []
 
+    # PASS 1 — read every archive, resolve per row, group by content identity.
+    kind_rank = {kind: i for i, (kind, *_rest) in enumerate(KINDS)}
+    groups: dict[tuple, list[dict]] = {}
+    order: list[tuple] = []
     for kind, id_field, surface, platform in KINDS:
         P = E.paths(ev, kind)
         index = read_jsonl(P.index, id_field)
@@ -297,18 +365,36 @@ def main() -> int:
         hits = near = 0
         for raw_id, e in index.items():
             v = verdicts.get(raw_id)
-            src = source_of(e, roster)
             surf, plat = resolve_surface(e, surface, platform)
-            items.append(to_item(e, v, ev["id"], kind, surf, plat, ids, roster, src))
-            # Only judged items get a detection row. An absent row is what makes
-            # the UI say "nog niet geanalyseerd" instead of inventing a miss.
+            key = content_key(e, surf, kind, raw_id)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append({"kind": kind, "raw_id": raw_id, "e": e, "v": v,
+                                "surf": surf, "plat": plat})
             if v is not None:
-                dets.append(to_detection(e, v, ev["id"], kind, surf, plat,
-                                         ids, roster, src))
                 hits += bool(v.get("detected"))
                 near += bool(v.get("near_miss"))
         report.append(f"  {kind:<10} {len(index):>4} rijen · {len(verdicts):>4} beoordeeld · "
                       f"{hits} met Stëlz · {near} bijna")
+
+    # PASS 2 — one row per piece of content, however many archives hold it.
+    merged_away = 0
+    for key in order:
+        grp = groups[key]
+        c = merge_group(grp, kind_rank) if len(grp) > 1 else grp[0]
+        merged_away += len(grp) - 1
+        src = source_of(c["e"], roster)
+        items.append(to_item(c["e"], c["v"], ev["id"], c["kind"], c["surf"],
+                             c["plat"], ids, roster, src))
+        # Only judged items get a detection row. An absent row is what makes
+        # the UI say "nog niet geanalyseerd" instead of inventing a miss.
+        if c["v"] is not None:
+            dets.append(to_detection(c["e"], c["v"], ev["id"], c["kind"],
+                                     c["surf"], c["plat"], ids, roster, src))
+    if merged_away:
+        report.append(f"  {merged_away} beelden stonden in meer dan één archief — "
+                      "samengevoegd, tag en cijfers behouden")
 
     if not items:
         print(f"No archives under {E.paths(ev, 'stories').dir.parent} — harvest first "

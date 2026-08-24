@@ -112,6 +112,11 @@ def main() -> int:
     grand: set[tuple[str, str]] = set()
     per_handle_items: collections.Counter = collections.Counter()
     hit_handles: collections.Counter = collections.Counter()
+    # Which archives saw each counted post. A clip found via #stelz AND via the
+    # profile scrape of its poster lives in two archives; the set-union above
+    # already counts it once, but saying so out loud is what keeps "78" credible
+    # when the archief-kolommen sum to more.
+    kinds_of_post: dict[tuple[str, str], set[str]] = collections.defaultdict(set)
     orphan_hits = 0
 
     print(f"\n  {ev['name']} — voortgang naar {DOEL} posts met Stëlz\n")
@@ -139,6 +144,7 @@ def main() -> int:
             key = post_key(item)
             posts.add(key)
             grand.add(key)
+            kinds_of_post[key].add(kind)
             if h and h not in roster:
                 hit_handles[h] += 1
         print(f"  {kind:<10} {len(items):>6} {len(verd):>10} {len(posts):>16}")
@@ -147,6 +153,10 @@ def main() -> int:
               f"geen accountbewijs, dus ook niet op het dashboard)")
 
     n = len(grand)
+    doubled = sum(1 for kinds in kinds_of_post.values() if len(kinds) > 1)
+    if doubled:
+        print(f"  ({doubled} van deze posts staan in twee archieven — tagvondst én "
+              "profielscrape — en tellen één keer)")
     print(f"\n  TOTAAL: {n} unieke posts · doel {DOEL} · "
           + (f"nog {DOEL - n} te gaan" if n < DOEL else "DOEL BEREIKT"))
 

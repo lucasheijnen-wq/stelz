@@ -353,3 +353,43 @@ describe.skipIf(!present)('every surface brings the one figure it publishes', ()
       .toBe(rollup.tiktokViews)
   })
 })
+
+// De kruisarchief-merge in 72_campaign_fixture.py. Dezelfde clip kwam via twee
+// routes binnen — als tagvondst in het discovery-archief én via de
+// profielscrape van de poster — en stond dus twee keer in de fixture: het
+// trefferaantal telde dezelfde waarneming dubbel en de grid tekende twee
+// identieke kaarten. In productie kan dat niet (één document per platform-id),
+// dus de fixture moet het ook niet kunnen.
+describe.skipIf(!present)('geen inhoud dubbel in de fixture', () => {
+  const items = present ? read<CampaignItem>(ITEMS) : []
+
+  it('bevat dezelfde dia of video nooit twee keer', () => {
+    // Identiteit zoals 72 hem legt: account + shortcode + dia voor Instagram,
+    // account + video-id voor TikTok. De id-TEKST verschilt per archief
+    // (discovery zet "ig" voor IG-ids), dus die is geen identiteit.
+    const seen = new Map<string, string>()
+    for (const i of items) {
+      if (i.surface === 'story') continue // stories staan maar in één archief
+      const handle = (i.platformHandle || i.creatorHandle || '').toLowerCase()
+      const key = i.surface === 'post'
+        ? `ig/${handle}/${i.postKey}/${i.slot ?? ''}`
+        : `tt/${handle}/${i.postKey}`
+      const before = seen.get(key)
+      expect(before, `${i.itemId} en ${before} zijn dezelfde inhoud, twee rijen`)
+        .toBeUndefined()
+      seen.set(key, i.itemId)
+    }
+  })
+
+  it('behield bij het samenvoegen de zoektag én de cijfers', () => {
+    // De twee kopieën verdelen de waarheid: de profielscrape draagt de likes,
+    // de tagvondst draagt found_via — het bewijs waarop de accountregel
+    // ongetagde posts laat meetellen. Gepind op een bekende samengevoegde dia;
+    // op een fixture van een ander evenement bestaat die niet en zegt deze
+    // test niets.
+    const slide = items.find((i) => i.postKey === 'DcVc6PRDG0u' && i.slot === 12)
+    if (!slide) return
+    expect(slide.foundVia).toBe('lowlands2026')
+    expect(slide.likes).not.toBeNull()
+  })
+})
