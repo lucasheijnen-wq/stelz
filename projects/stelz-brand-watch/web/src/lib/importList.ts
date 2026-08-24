@@ -44,7 +44,20 @@ export function extractHandle(
   platform: 'instagram' | 'tiktok',
 ): { handle: string | null; warning: string | null } {
   // Zero-width characters ride along with copy-paste from Sheets.
-  const cleaned = raw.replace(/[​‌‍﻿]/g, '').trim()
+  //
+  // ESCAPES, NOT THE CHARACTERS THEMSELVES. This class used to hold the four
+  // literal code points, which meant the line that strips invisible characters
+  // was itself invisible: unreadable in review, unfindable with grep, and one
+  // editor "clean up whitespace" or over-eager git filter away from becoming
+  // `[]` — a class that matches nothing, silently ending the cleanup while the
+  // code still looks correct. U+200B zero-width space, U+200C non-joiner,
+  // U+200D joiner, U+FEFF byte-order mark.
+  //
+  // An alternation rather than a character class, because inside a class the
+  // adjacent pair U+200C U+200D is ambiguous to a reader and to the linter: it
+  // could mean "either of these two" or "this one two-character sequence".
+  // Written as | it is unmistakably the first.
+  const cleaned = raw.replace(/\u200B|\u200C|\u200D|\uFEFF/g, '').trim()
   if (ABSENT.has(cleaned.toLowerCase())) return { handle: null, warning: null }
 
   let candidate = cleaned

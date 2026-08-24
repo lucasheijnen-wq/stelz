@@ -19,7 +19,7 @@
 // nulls at the bottom in BOTH directions — sorting by views ascending must not
 // put 22 unmeasurable stories above the video that got 194.300 plays.
 
-import { PRODUCT_LINE_LABEL } from '../components/ui'
+import { PRODUCT_LINE_LABEL } from './labels'
 import { SOURCE_LABEL, SURFACE_LABEL, type CampaignRow, type Surface } from './campaign'
 import { isStelzStory } from './storyStats'
 import { fmtDate, fmtNum } from './format'

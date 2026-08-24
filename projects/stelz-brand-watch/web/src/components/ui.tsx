@@ -232,12 +232,6 @@ export function Avatar({ src, handle, className = '' }: { src?: string | null; h
   )
 }
 
-/** Follower counts are frequently absent — Instagram's hashtag scrape simply
- *  does not return them. Rendering the absence as "0 followers" states
- *  something false about the creator; omitting the line states nothing. */
-export function formatFollowers(n: number | null | undefined): string | null {
-  return n && n > 0 ? n.toLocaleString() : null
-}
 
 export function Img({
   src,
@@ -339,11 +333,3 @@ export function Pill({
   )
 }
 
-export const PRODUCT_LINE_LABEL: Record<string, string> = {
-  hard_lemonade: 'Hard Lemonade',
-  hard_seltzer: 'Hard Seltzer',
-  hard_iced_tea: 'Hard Iced Tea',
-  mixed_classics: 'Mixed Classics',
-  logo_only: 'Logo only',
-  zero_zero: 'Zero Zero',
-}

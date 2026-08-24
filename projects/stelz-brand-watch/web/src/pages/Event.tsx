@@ -43,7 +43,7 @@ import {
 } from '../lib/events'
 import { fbFetchCreatorProfiles, type CreatorProfile } from '../lib/firestore'
 import { fetchProjects, projectsAction, type Project } from '../lib/data'
-import { useMembership } from '../lib/membership'
+import { useMembership } from '../lib/membershipContext'
 import type { DetectionRow } from '../lib/types'
 import { fmtNum, compactNum } from '../lib/format'
 import { useCampaignPreview, useCampaignDetectionsPreview, useAudiencePreview } from '../lib/devPreview'

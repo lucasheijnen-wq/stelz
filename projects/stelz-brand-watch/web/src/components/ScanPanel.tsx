@@ -9,8 +9,9 @@
 // detect fan-out — which is where nearly all the wall-clock time goes.
 // Separation is by border only: box-shadow is globally disabled by the brand.
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Card } from './ui'
+import { useNow } from '../lib/useNow'
 import { analysisProgress, scanHeadline, scanPhase, stepViews, type StepView } from '../lib/scanProgress'
 import type { ScanState, ScanStepKey } from '../lib/firestore'
 
@@ -25,11 +26,7 @@ export function ScanPanel({
 }) {
   // Re-render on a timer: staleness and the ETA are functions of wall-clock
   // time, so a snapshot-only render can sit on "3 min left" indefinitely.
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 5_000)
-    return () => clearInterval(t)
-  }, [])
+  const now = useNow(5_000)
 
   const phase = scanPhase(scan, now)
   const headline = scanHeadline(scan, now)
@@ -40,9 +37,18 @@ export function ScanPanel({
 
   // Expand on its own when something is happening or something broke; a
   // finished scan collapses back to one line.
-  useEffect(() => {
+  //
+  // Adjusted DURING RENDER on a phase change rather than in an effect. React
+  // supports this shape for exactly this purpose and it re-renders before
+  // painting, so the panel never shows one frame collapsed and then jumps.
+  // The effect version wrote state on every run where the condition still held,
+  // which meant a panel the user had collapsed sprang back open on the next
+  // unrelated re-render.
+  const [lastPhase, setLastPhase] = useState(phase)
+  if (lastPhase !== phase) {
+    setLastPhase(phase)
     if (busy || phase === 'error' || phase === 'stalled') setOpen(true)
-  }, [busy, phase])
+  }
 
   if (phase === 'idle') return null
 

@@ -14,7 +14,8 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { PageShell, Card, Badge, Button, Avatar, Tabs, CARD_GRID } from '../components/ui'
 import { MediaTile } from '../components/MediaTile'
 import { DetectionDrawer } from '../components/DetectionDrawer'
-import { StackedDayBars, bucketByDay, type Series } from '../components/Chart'
+import { StackedDayBars, type Series } from '../components/Chart'
+import { bucketByDay } from '../lib/buckets'
 import { PasteImport } from '../components/PasteImport'
 import { StoriesStrip } from '../components/StoriesStrip'
 import { fmtNum } from '../lib/format'
@@ -25,7 +26,7 @@ import {
   type CreatorProfile, type StoriesState, type StoryPost,
 } from '../lib/firestore'
 import { rollupProject, splitCreatorId } from '../lib/projects'
-import { useMembership } from '../lib/membership'
+import { useMembership } from '../lib/membershipContext'
 import { useStoryPostsPreview } from '../lib/devPreview'
 import { StoriesView } from './Stories'
 import { joinStories } from '../lib/storyStats'
@@ -55,9 +56,23 @@ export default function ProjectPage() {
   const [scanMsg, setScanMsg] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
+  // THE FETCH LIVES IN THE EFFECT, and callers re-trigger it by bumping
+  // `reloadKey`. It used to be a useCallback the effect invoked, which is the
+  // shape react-hooks/set-state-in-effect exists to catch: the effect body
+  // reached a setState synchronously.
+  //
+  // The rewrite pays for itself twice. It brings CANCELLATION, which the
+  // callback version had none of — open a project, click straight through to
+  // another, and the first project's rows still arrived and overwrote the
+  // second's, because nothing told the in-flight request it was obsolete. And
+  // `loading` is now raised by whoever asks for a reload, from a click or a
+  // timer, instead of by the fetch itself.
+  const [reloadKey, setReloadKey] = useState(0)
+  const reload = () => { setLoading(true); setError(null); setReloadKey((k) => k + 1) }
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
     try {
       // Profiles ride along for display names + fresh follower counts —
       // imported roster members have a fullName long before their first hit.
@@ -65,6 +80,7 @@ export default function ProjectPage() {
         fetchProjects(),
         fetchCreatorProfiles().catch(() => ({} as Record<string, CreatorProfile>)),
       ])
+      if (cancelled) return
       setProfiles(profs)
       const p = all.find((x) => x.id === projectId) ?? null
       setProject(p)
@@ -76,6 +92,7 @@ export default function ProjectPage() {
             fetchDetections({ creatorHandle: splitCreatorId(cid).handle, limit: 300 }).catch(() => []),
           ),
         )
+        if (cancelled) return
         // Moderator-rejected rows are excluded, matching every other surface.
         setRows(dedupeByPost(batches.flat()).filter((r) => r.is_false_positive !== true))
         // Stories separately: the per-creator fetch above is detected-only, so
@@ -87,6 +104,7 @@ export default function ProjectPage() {
           fbFetchStoryPosts(2000).catch(() => null),
           fbFetchStories(2000).catch(() => [] as DetectionRow[]),
         ])
+        if (cancelled) return
         setStoryPosts(sp && sp.filter((x) => members.has(x.creatorHandle)))
         setStoryDetections(dedupeByPost(sd))
       } else {
@@ -95,13 +113,13 @@ export default function ProjectPage() {
         setStoryDetections([])
       }
     } catch (e) {
-      setError((e as Error).message)
+      if (!cancelled) setError((e as Error).message)
     } finally {
-      setLoading(false)
+      if (!cancelled) setLoading(false)
     }
-  }, [projectId])
-
-  useEffect(() => { void load() }, [load])
+    })()
+    return () => { cancelled = true }
+  }, [projectId, reloadKey])
 
   const rollup = useMemo(
     () => (project ? rollupProject(project, rows) : null),
@@ -134,15 +152,15 @@ export default function ProjectPage() {
     setStoriesError(null)
     try {
       await fbStepStories()
-      await load()
+      reload()
       // Detections trail the sweep by a fan-out; look again shortly.
-      window.setTimeout(() => { void load() }, 20_000)
+      window.setTimeout(reload, 20_000)
     } catch (e) {
       setStoriesError((e as Error).message)
     } finally {
       setStoriesFetching(false)
     }
-  }, [load])
+  }, [])
 
   const act = async (
     action: 'addCreators' | 'removeCreators' | 'archive' | 'unarchive',
@@ -157,7 +175,7 @@ export default function ProjectPage() {
       if (action === 'addCreators') {
         // New members need their profiles/rows fetched to render properly.
         setShowImport(false)
-        void load()
+        reload()
       }
     } catch (e) {
       setError((e as Error).message)

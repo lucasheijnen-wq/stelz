@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useAuth, authErrorMessage } from '../lib/auth'
+import { useAuth } from '../lib/authContext'
+import { authErrorMessage } from '../lib/authErrors'
 import { AuthShell, GoogleButton } from './Login'
 
 export default function Signup() {

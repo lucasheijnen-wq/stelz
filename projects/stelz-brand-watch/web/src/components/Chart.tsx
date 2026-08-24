@@ -10,22 +10,6 @@ const TONE: Record<NonNullable<Series['tone']>, string> = {
   bad: 'var(--color-bad)',
 }
 
-export function bucketByDay(timestamps: (string | null)[], days = 30): DayPoint[] {
-  const buckets = new Map<string, number>()
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(today)
-    d.setDate(today.getDate() - i)
-    buckets.set(d.toISOString().slice(0, 10), 0)
-  }
-  for (const t of timestamps) {
-    if (!t) continue
-    const key = t.slice(0, 10)
-    if (buckets.has(key)) buckets.set(key, (buckets.get(key) ?? 0) + 1)
-  }
-  return [...buckets.entries()].map(([d, n]) => ({ d, n }))
-}
 
 export function Sparkline({ data, height = 28, tone = 'ink' }: { data: DayPoint[]; height?: number; tone?: Series['tone'] }) {
   if (!data.length) return null
@@ -70,7 +54,10 @@ export function LineChart({
   const innerH = height - padTop - padBottom
   const stepX = len > 1 ? innerW / (len - 1) : 0
 
-  const fmt = yFormat ?? ((n) => n.toString())
+  // Gememoiseerd omdat de fallback anders bij elke render een nieuwe functie is,
+  // waardoor het gridY-useMemo hieronder zijn hele rooster elke render opnieuw
+  // uitrekende — een memo die niets bespaarde.
+  const fmt = useMemo(() => yFormat ?? ((n: number) => n.toString()), [yFormat])
 
   const gridY = useMemo(() => {
     const ticks = 4
@@ -258,11 +245,17 @@ export function Donut({ slices, size = 160, centreLabel, centreSub }: {
   const inner = radius * 0.62
   const cx = radius
   const cy = radius
-  let acc = 0
+  // Waar elke schijf begint, vooraf uitgerekend. Dit was een `let acc` die in
+  // de map werd opgehoogd: een variabele van buiten de callback die tijdens de
+  // render muteert, en daarmee een render die van zijn eigen volgorde afhangt.
+  // Draait React de map ooit opnieuw of gedeeltelijk, dan staan de schijven
+  // ergens anders. Aantal schijven is een handvol, dus de dubbele lus kost niets.
+  const startAt = slices.map(
+    (_, i) => slices.slice(0, i).reduce((sum, x) => sum + x.value, 0))
+
   const arcs = slices.map((s, i) => {
-    const a0 = (acc / total) * Math.PI * 2 - Math.PI / 2
-    acc += s.value
-    const a1 = (acc / total) * Math.PI * 2 - Math.PI / 2
+    const a0 = (startAt[i] / total) * Math.PI * 2 - Math.PI / 2
+    const a1 = ((startAt[i] + s.value) / total) * Math.PI * 2 - Math.PI / 2
     const large = a1 - a0 > Math.PI ? 1 : 0
     const x0 = cx + Math.cos(a0) * radius
     const y0 = cy + Math.sin(a0) * radius

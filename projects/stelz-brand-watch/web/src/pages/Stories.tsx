@@ -14,7 +14,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { PageShell, Card, Badge } from '../components/ui'
 import { MediaTile } from '../components/MediaTile'
-import { StackedDayBars, bucketByDay, type Series } from '../components/Chart'
+import { StackedDayBars, type Series } from '../components/Chart'
+import { bucketByDay } from '../lib/buckets'
 import {
   fbFetchStoryPosts, fbFetchStories, fbFetchCreatorProfiles,
   type StoryPost, type CreatorProfile,

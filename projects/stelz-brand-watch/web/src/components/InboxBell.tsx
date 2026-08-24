@@ -2,7 +2,7 @@
 // hits, spikes, scan-complete events as a sidebar dropdown.
 
 import { useEffect, useRef, useState } from 'react'
-import { useAuth } from '../lib/auth'
+import { useAuth } from '../lib/authContext'
 import { fbSubscribeInbox, fbMarkInboxRead, fbMarkAllInboxRead, type InboxItem } from '../lib/firestore'
 
 export function InboxBell() {

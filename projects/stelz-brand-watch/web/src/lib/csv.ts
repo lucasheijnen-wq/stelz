@@ -29,11 +29,18 @@ function field(v: unknown): string {
   return `"${s.replace(/"/g, '""')}"`
 }
 
+// U+FEFF, as an escape rather than the character itself. Written literally
+// this line read `return '' + lines.join(...)` — a concatenation with what
+// looks like an empty string, which is an invitation to delete it and
+// silently break every export the moment someone tidies up. See
+// sourceHygiene.test.ts, which now refuses invisible characters outright.
+const BOM = '\uFEFF'
+
 function toCsv(headers: string[], rows: unknown[][]): string {
   const lines = [headers.map(field).join(','), ...rows.map((r) => r.map(field).join(','))]
   // BOM so Excel opens UTF-8 correctly — without it "Stëlz" arrives mangled,
   // which is a poor look on an export of a brand's own name.
-  return '﻿' + lines.join('\r\n')
+  return BOM + lines.join('\r\n')
 }
 
 export function detectionsCsv(rows: DetectionRow[]): string {

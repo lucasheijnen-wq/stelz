@@ -14,9 +14,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import {
-  PageShell, Card, Badge, Button, Avatar, PRODUCT_LINE_LABEL, CARD_GRID,
-} from '../components/ui'
+import { PageShell, Card, Badge, Button, Avatar, CARD_GRID } from '../components/ui'
+import { PRODUCT_LINE_LABEL } from '../lib/labels'
 import { MediaTile } from '../components/MediaTile'
 import { imageUrlFor, dedupeByPost, parentPostKey, type DetectionRow, type ResonanceRow } from '../lib/types'
 import { fetchDetections, fetchResonanceForCreator, fetchCreatorProfile } from '../lib/data'
@@ -35,6 +34,7 @@ import { followerIndex, hitTotals, stelzHits } from '../lib/hits'
 import { bookingFor, formatWindow, matchEvent } from '../lib/events'
 import { EVENTS } from '../data/events'
 import { compactNum, fmtDate, fmtNum } from '../lib/format'
+import { useResetOn } from '../lib/useResetOn'
 
 export default function Creator() {
   const { handle = '' } = useParams()
@@ -53,10 +53,20 @@ export default function Creator() {
   const previewItems = useCampaignPreview()
   const previewDetections = useCampaignDetectionsPreview()
 
+  // Een andere creator betekent: het vorige antwoord is niet meer van
+  // toepassing. Dat hoort in de render, niet in het effect — als effect stond
+  // de nieuwe naam al boven de cijfers van de vorige, één frame lang.
+  // De beginwaarden hierboven (loading = true, de rest leeg) dekken de eerste
+  // render al; dit dekt elke wisseling daarna.
+  useResetOn(handle, () => {
+    setLoading(true)
+    setResonance(null)
+    setProfileRecord(null)
+  })
+
   useEffect(() => {
     if (!handle) return
     let cancelled = false
-    setLoading(true)
     fetchDetections({ creatorHandle: handle, limit: 300 })
       .then((det) => { if (!cancelled) { setRows(det); setLoading(false) } })
       .catch((e) => { if (!cancelled) { setError(e.message ?? String(e)); setLoading(false) } })
@@ -69,8 +79,6 @@ export default function Creator() {
   useEffect(() => {
     if (!handle) return
     let cancelled = false
-    setResonance(null)
-    setProfileRecord(null)
     fetchResonanceForCreator(handle)
       .then((r) => { if (!cancelled) setResonance(r) })
       .catch(() => { if (!cancelled) setResonance(null) })

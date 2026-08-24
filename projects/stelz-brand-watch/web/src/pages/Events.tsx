@@ -22,7 +22,7 @@ import { joinCampaign, type CampaignItem, type CampaignRow } from '../lib/campai
 import { isStelzStory } from '../lib/storyStats'
 import { fetchProjects, type Project } from '../lib/data'
 import { TOTAL_TRACKED_CAP, trackedCreators } from '../lib/projects'
-import { useMembership } from '../lib/membership'
+import { useMembership } from '../lib/membershipContext'
 import { useCampaignPreview, useCampaignDetectionsPreview } from '../lib/devPreview'
 import type { DetectionRow } from '../lib/types'
 import { fmtNum } from '../lib/format'
