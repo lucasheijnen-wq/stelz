@@ -10,6 +10,15 @@ ronde exact hetzelfde rekent:
     post       = (handle, short_code | video_id)  — een carrousel is één post
     in venster = E.in_window over posted_at        — zelfde regel als het dashboard
     treffer    = detected == true in verdicts.jsonl
+    en telbaar = het dashboard zou hem tonen: roster, óf een eigen matchende
+                 tag (caption of vastgelegde zoektag), óf accountbewijs — een
+                 ándere in-venster post van hetzelfde account mét zo'n tag.
+                 Zonder die laatste regel telde deze teller één post meer dan
+                 het dashboard: een Stëlz-vondst op het profiel van een getagde
+                 vriend die zelf nooit een Lowlands-tag gebruikte. Materieel
+                 waarschijnlijk wél Lowlands, maar niet verantwoordbaar — en
+                 een teller die meer telt dan het scherm is precies de
+                 "verruimde definitie" die het plan uitsluit.
 
 DE SNEEUWBAL is de tweede uitvoer: non-roster accounts met een treffer waarvan
 we vrijwel niets in het archief hebben. Wie het blikje één keer filmde heeft er
@@ -66,6 +75,16 @@ def post_key(item: dict) -> tuple[str, str]:
             str(item.get("short_code") or item.get("video_id") or item_id(item)))
 
 
+def matching_tags(ev: dict, item: dict) -> bool:
+    """Draagt dit item zelf bewijs — een caption-tag of vastgelegde zoektag
+    uit de taglijst van het evenement?"""
+    ordered = {t for t, _ in E.tags(ev)}
+    via = (item.get("found_via") or "").lstrip("#").lower()
+    if via and via in ordered:
+        return True
+    return any(t.lstrip("#").lower() in ordered for t in (item.get("hashtags") or []))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -74,15 +93,32 @@ def main() -> int:
     ev = E.load(args.event)
     roster = {h.lower() for h in E.roster_accounts(ev)}
 
+    # PAS 1: bewijs verzamelen — welke non-roster accounts hebben ergens in het
+    # venster een item mét matchende tag? Zelfde regel als
+    # events.evidencedHandlesFor aan de dashboardkant.
+    all_items: dict[str, list[dict]] = {}
+    evidenced: set[str] = set()
+    for kind in E.KINDS:
+        base = E.archive_dir(ev, kind)
+        all_items[kind] = read_jsonl(base / "index.jsonl")
+        for item in all_items[kind]:
+            h = (item.get("handle") or "").lower()
+            if not h or h in roster or h in evidenced:
+                continue
+            ts = item.get("posted_at") or item.get("taken_at")
+            if E.in_window(ev, ts) and matching_tags(ev, item):
+                evidenced.add(h)
+
     grand: set[tuple[str, str]] = set()
     per_handle_items: collections.Counter = collections.Counter()
     hit_handles: collections.Counter = collections.Counter()
+    orphan_hits = 0
 
     print(f"\n  {ev['name']} — voortgang naar {DOEL} posts met Stëlz\n")
     print(f"  {'archief':<10} {'items':>6} {'beoordeeld':>10} {'posts met Stëlz':>16}")
     for kind in E.KINDS:
         base = E.archive_dir(ev, kind)
-        items = read_jsonl(base / "index.jsonl")
+        items = all_items[kind]
         verd = verdicts_by_id(read_jsonl(base / "verdicts.jsonl"))
         posts: set[tuple[str, str]] = set()
         for item in items:
@@ -94,12 +130,21 @@ def main() -> int:
             ts = item.get("posted_at") or item.get("taken_at")
             if not E.in_window(ev, ts):
                 continue
+            # PAS 2: telbaar zoals het dashboard telt — roster, eigen tag, of
+            # accountbewijs. Een wees (geen van drieën) telt niet mee, hoe
+            # echt zijn blikje ook is.
+            if h not in roster and not matching_tags(ev, item) and h not in evidenced:
+                orphan_hits += 1
+                continue
             key = post_key(item)
             posts.add(key)
             grand.add(key)
             if h and h not in roster:
                 hit_handles[h] += 1
         print(f"  {kind:<10} {len(items):>6} {len(verd):>10} {len(posts):>16}")
+    if orphan_hits:
+        print(f"\n  ({orphan_hits} treffer-waarneming(en) niet geteld: wees — geen tag, "
+              f"geen accountbewijs, dus ook niet op het dashboard)")
 
     n = len(grand)
     print(f"\n  TOTAAL: {n} unieke posts · doel {DOEL} · "

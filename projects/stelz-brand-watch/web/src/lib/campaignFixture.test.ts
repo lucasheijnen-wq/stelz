@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { joinCampaign, campaignRollup, metricFor, stelzShare, SURFACES } from './campaign'
-import { matchEvent, inWindow } from './events'
+import { evidencedHandlesFor, matchEvent, inWindow } from './events'
 import { getEvent, type StelzEvent } from '../data/events'
 import type { CampaignItem } from './campaign'
 import type { DetectionRow } from './types'
@@ -171,10 +171,32 @@ describe.skipIf(!present)('the roster / discovery split in the real fixture', ()
     }
   })
 
-  it('gives every discovery row the hashtag that found it', () => {
+  it('kan elke discovery-rij verantwoorden: een zoektag, of accountbewijs', () => {
+    // Vroeger droeg élke discovery-rij zijn zoektag — discovery kón alleen uit
+    // tagzoekopdrachten komen. Sinds de profielscrapes bestaat er een tweede
+    // soort: de ongetagde rij van een account dat elders in het venster wél
+    // een tag-match heeft. Die krijgt zijn foundVia ('profiel') pas op het
+    // dashboard, van matchEvent. Wat NIET mag bestaan is een discovery-rij
+    // zonder tag én zonder bewijs — die is op geen enkele manier aan het
+    // evenement te verantwoorden.
     const disc = rows.filter((r) => r.source === 'discovery')
     if (disc.length === 0) return
-    expect(disc.every((r) => (r.foundVia ?? '').length > 0)).toBe(true)
+    const ev = getEvent('lowlands-2026') as StelzEvent
+    const evidenced = evidencedHandlesFor(ev, rows)
+    const orphans = disc.filter((r) => {
+      if ((r.foundVia ?? '').length > 0) return false
+      const account = (r.platformHandle || r.creatorHandle || '').toLowerCase()
+      return !evidenced.has(account)
+    })
+    // Wezen MOGEN in de fixture bestaan — de profielscrape van een getagde
+    // vriend haalt ook diens niet-festivalposts binnen (@vara_gids is een
+    // tv-gids; getagd wórden is geen bewijs dat je eigen feed Lowlands is).
+    // Wat niet mag: dat zo'n rij het dashboard haalt. matchEvent moet elke
+    // wees afwijzen, en dat is precies wat hier vastligt.
+    for (const r of orphans) {
+      expect(matchEvent(ev, r, evidenced), `${r.postKey} is een wees en telt toch mee`)
+        .toBeNull()
+    }
   })
 
   it('keeps the two view counts separate and adding up', () => {
