@@ -29,7 +29,7 @@ import logging
 from typing import Any
 
 from google.cloud import pubsub_v1
-from google.cloud.firestore import SERVER_TIMESTAMP
+from google.cloud.firestore import SERVER_TIMESTAMP, Increment
 
 from lib import apify, fs, usage
 
@@ -243,7 +243,15 @@ def _mark_run(brand_id: str, *, found: int, checked: int, skipped: str | None = 
         log.exception(f"[{brand_id}] could not stamp stories run")
 
 
-def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = False) -> dict[str, Any]:
+def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = False,
+        session_counters: bool = False) -> dict[str, Any]:
+    """`session_counters`: bump scan.detectTasksEnqueued for this run's fan-out.
+
+    True only for the HTTP step a person started from the dashboard — the scan
+    panel's denominator must count the work THAT session enqueued. The 6-hourly
+    scheduler leaves it False: repainting a human-watched panel from a
+    background sweep is exactly what the stories block on the brand doc exists
+    to avoid."""
     brand = fs.brand_doc(brand_id).get()
     if not brand.exists:
         raise ValueError(f"brand not found: {brand_id}")
@@ -412,6 +420,14 @@ def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = F
         if futures:
             from concurrent.futures import wait as _fwait
             _fwait(futures, timeout=30)
+        # Same denominator rule as scan_creators: the detect workers count
+        # completions from every path, so every path that enqueues must also
+        # count — but only when a person is watching this scan session.
+        if session_counters and images_enqueued + videos_enqueued > 0:
+            fs.brand_doc(brand_id).set({"scan": {
+                "detectTasksEnqueued": Increment(images_enqueued + videos_enqueued),
+                "lastActivityAt": SERVER_TIMESTAMP,
+            }}, merge=True)
     else:
         videos_enqueued = sum(1 for _, k, _ in new_items if k == "video")
         images_enqueued = sum(1 for _, k, _ in new_items if k == "image")

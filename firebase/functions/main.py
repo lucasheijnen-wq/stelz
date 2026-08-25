@@ -346,6 +346,10 @@ def api_step_stories(req: https_fn.Request) -> https_fn.Response:
     return _run_step(req, lambda brand_id, body: scan_stories.run(
         brand_id,
         max_handles=int(body.get("maxHandles") or scan_stories.DEFAULT_MAX_HANDLES),
+        # A person started this session from the dashboard, so its fan-out
+        # belongs in the scan panel's denominator. The 6-hourly scheduler
+        # deliberately leaves this off.
+        session_counters=True,
     ), step="stories")
 
 

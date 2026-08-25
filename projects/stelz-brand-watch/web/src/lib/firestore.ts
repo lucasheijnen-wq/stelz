@@ -596,7 +596,12 @@ export async function fbBootstrapBrand(brandName = 'Stelz') {
 }
 
 // Per-step scan API. UI calls these sequentially and shows progress between them.
-export async function fbStepHashtags(perTag = 500, maxTags = 50) {
+// Defaults live HERE, not at the call sites. 500/50 projected ~$40 of Apify
+// against the $5 default daily budget — the whole day spent in one click. The
+// server now trims any request to fit the remaining budget (publish_tags),
+// but a client that asks for a sane size to begin with leaves the trim as the
+// safety net it should be, not the sizing mechanism.
+export async function fbStepHashtags(perTag = 150, maxTags = 30) {
   return authedFetch('api_step_hashtags', { brandId: BRAND_ID, perTag, maxTags })
 }
 export async function fbStepCreators(maxCreators = 80, postsPer = 8) {

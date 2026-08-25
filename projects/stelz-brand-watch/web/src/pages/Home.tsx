@@ -2578,7 +2578,7 @@ function RunScanButton({ onComplete, liveHits, onStepErrors }: {
     setClicking(true); setError(null)
     try {
       await fbBootstrapBrand()
-      await fbStepHashtags(500, 50)
+      await fbStepHashtags()
       // creators + SRS still run in the background — fire-and-forget without
       // blocking the pill. Failures surface as `error` on brand.scan later.
       // Subcultures must land before SRS — the subculture layer reads the

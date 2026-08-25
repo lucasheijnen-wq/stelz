@@ -216,5 +216,130 @@ class TestSelection(ScanCreatorsBase):
         self.assertEqual(out["creators_scanned"], 0)
 
 
+class TestCarouselChildIds(unittest.TestCase):
+    """The deep-scan must land a slide on the SAME post id as the hashtag path.
+
+    It used to fan every slide out under the PARENT id while scan_hashtags
+    persisted per-child docs — the same slide produced two detection docs
+    (instagram_{parent}_{child}_{hash} next to instagram_{parent}_{hash}).
+    The frontend collapsed them on screen; Firestore, detectionsHit and the
+    Gemini bill did not."""
+
+    def setUp(self):
+        self.writes: dict[str, dict] = {}
+        tests_self = self
+
+        class FakeDoc:
+            def __init__(self, doc_id):
+                self._id = doc_id
+
+            def set(self, payload, merge=False):
+                tests_self.writes[self._id] = payload
+
+            def collection(self, name):
+                return FakeCol(prefix=f"{self._id}/{name}")
+
+        class FakeCol:
+            def __init__(self, prefix=""):
+                self._prefix = prefix
+
+            def document(self, doc_id):
+                return FakeDoc(f"{self._prefix}/{doc_id}" if self._prefix else doc_id)
+
+        self.posts_col = FakeCol()
+        self.new_items: list = []
+        from lib import fs as fs_real
+        self.fs_real = fs_real
+        # _persist_post reads fs.composite_id; give it the real pure function.
+        p = mock.patch.object(scan_creators, "fs",
+                              types.SimpleNamespace(composite_id=fs_real.composite_id))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _sidecar_item(self):
+        return {
+            "id": "P1", "shortCode": "SC1", "type": "Sidecar",
+            "url": "https://instagram.com/p/SC1", "caption": "festival!",
+            "hashtags": ["stelz"], "mentions": [],
+            "timestamp": "2026-08-22T10:00:00Z",
+            "likesCount": 12, "commentsCount": 2,
+            "displayUrl": "http://img/1",
+            "childPosts": [
+                {"id": "C1", "displayUrl": "http://img/1"},
+                {"id": "C2", "displayUrl": "http://img/2"},
+                # A keyless child: the helper cannot id it, so it must fall
+                # back to the parent-keyed fan-out — coverage never drops.
+                {"displayUrl": "http://img/3"},
+            ],
+        }
+
+    def test_children_fan_out_under_child_ids(self):
+        creator_by_handle = {"anna": (mock.Mock(), {})}
+        scan_creators._persist_post(
+            "stelz", {**self._sidecar_item(), "ownerUsername": "anna"},
+            "instagram", creator_by_handle, self.posts_col, self.new_items)
+        parent_id = self.fs_real.composite_id("instagram", "P1")
+        by_url = {url: pid for pid, _kind, url in self.new_items}
+        self.assertEqual(by_url["http://img/1"],
+                         self.fs_real.composite_id("instagram", "P1_C1"))
+        self.assertEqual(by_url["http://img/2"],
+                         self.fs_real.composite_id("instagram", "P1_C2"))
+        # The keyless child rides on the parent — found, not dropped.
+        self.assertEqual(by_url["http://img/3"], parent_id)
+        # And NO parent-keyed duplicate exists for the identified children.
+        parent_urls = [u for pid, _k, u in self.new_items if pid == parent_id]
+        self.assertEqual(parent_urls, ["http://img/3"])
+
+    def test_single_image_post_is_unchanged(self):
+        creator_by_handle = {"anna": (mock.Mock(), {})}
+        item = {"id": "S1", "type": "Image", "displayUrl": "http://img/solo",
+                "ownerUsername": "anna", "timestamp": "2026-08-22T10:00:00Z",
+                "caption": "", "hashtags": [], "mentions": []}
+        scan_creators._persist_post(
+            "stelz", item, "instagram", creator_by_handle, self.posts_col, self.new_items)
+        self.assertEqual(self.new_items, [
+            (self.fs_real.composite_id("instagram", "S1"), "image", "http://img/solo")])
+
+
+class TestDetectDenominator(ScanCreatorsBase):
+    def test_fanout_bumps_the_scan_denominator(self):
+        # Only the hashtag path used to feed detectTasksEnqueued, while the
+        # detect workers count completions from EVERY path — completions
+        # overshot the denominator and the panel's bar clamped to done.
+        brand_sets: list[dict] = []
+        fake_brand = types.SimpleNamespace(
+            get=lambda: mock.Mock(exists=True),
+            set=lambda payload, merge=False: brand_sets.append(payload))
+        scan_creators.fs.brand_doc = lambda bid: fake_brand
+        self.creators["instagram_anna"] = {
+            "status": "discovered", "platform": "instagram", "handle": "anna",
+            "nextScanAt": PAST,
+        }
+        self.apify.scrape_profile_ig.return_value = [{"id": "1"}]
+        with mock.patch.object(
+            scan_creators, "_persist_post",
+            lambda bid, item, plat, cbh, pc, ni: ni.extend(
+                [("instagram_1", "image", "http://a"),
+                 ("instagram_2", "video", "http://b")]),
+        ), mock.patch.object(scan_creators, "pubsub_v1", types.SimpleNamespace(
+            PublisherClient=lambda: _CountingPublisher()),
+        ), mock.patch.object(scan_creators, "Increment", lambda n: ("INC", n)):
+            scan_creators.run("stelz", dry_run=False)
+        bumps = [p["scan"]["detectTasksEnqueued"]
+                 for p in brand_sets if "scan" in p]
+        self.assertEqual(bumps, [("INC", 2)])
+
+
+class _CountingPublisher:
+    def topic_path(self, project, topic):
+        return f"{project}/{topic}"
+
+    def publish(self, topic, payload):
+        from concurrent.futures import Future
+        f = Future()
+        f.set_result("id")
+        return f
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

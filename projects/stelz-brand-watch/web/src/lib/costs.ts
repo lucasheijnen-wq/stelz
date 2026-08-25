@@ -152,8 +152,13 @@ export function degradeLevel(spend: number, budget: number): Degrade {
 // price card describes the button you are about to press, not a hypothetical.
 
 export const DEFAULTS = {
-  hashtagPerTag: 500,
-  hashtagMaxTags: 50,
+  // Lowered from 500/50, which projected ~$40 of Apify against the $5 default
+  // daily budget — the whole day spent in one click. The server now also trims
+  // any request to the remaining budget (publish_tags), so these are the
+  // opening bid, not the guarantee. test_cost_parity pins them to the
+  // fbStepHashtags call site so this card always describes the real button.
+  hashtagPerTag: 150,
+  hashtagMaxTags: 30,
   creatorMax: 80,
   creatorPostsPer: 8,
   storyMaxHandles: 60,

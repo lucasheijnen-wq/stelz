@@ -209,3 +209,39 @@ describe('een dode scan mag niet eeuwig bezig lijken', () => {
     expect(scanPhase(s, NOW)).toBe('scraping')
   })
 })
+
+// De vierde weg waarop de homepage eeuwig "bezig" leek: de backend sloot de
+// hashtags-stap vier commits lang nooit af (ontbrekende import, pas ná het
+// stempelen van finishedAt), dus steps.hashtags bleef "running" — en een
+// running step won het van elke ontsnapping omdat finishedAt de stale-check
+// kortsluit. "Running" wordt nu alleen geloofd zolang de backend überhaupt
+// recent iets schreef.
+describe('een step die eeuwig running zegt', () => {
+  const UREN_LATER = NOW + 7 * 3600_000
+  const runningStep = {
+    hashtags: { state: 'running' as const, startedAt: null, finishedAt: null,
+                error: null, counts: {} },
+  }
+
+  it('wordt na uren stilte een fout, geen eeuwige "Bezig met scannen"', () => {
+    const s = state({ finishedAt: '2026-08-20T11:52:00Z', steps: runningStep })
+    expect(scanPhase(s, UREN_LATER)).toBe('error')
+    const row = stepViews(s, {}, UREN_LATER).find((v) => v.key === 'hashtags')!
+    expect(row.state).toBe('error')
+    expect(row.error).toContain('niet afgemaakt')
+  })
+
+  it('blijft gewoon scraping terwijl de backend nog recent schreef', () => {
+    const s = state({ steps: runningStep })
+    expect(scanPhase(s, NOW)).toBe('scraping')
+    expect(stepViews(s, {}, NOW).find((v) => v.key === 'hashtags')!.state)
+      .toBe('running')
+  })
+
+  it('binnen de horizon telt running op een afgeronde scan ook nog', () => {
+    // finishedAt is het einde van de PUBLISHER; een step die daarna nog
+    // doorwerkt is normaal, zolang het geen uren stilte is.
+    const s = state({ finishedAt: '2026-08-20T11:58:00Z', steps: runningStep })
+    expect(scanPhase(s, NOW)).toBe('scraping')
+  })
+})
