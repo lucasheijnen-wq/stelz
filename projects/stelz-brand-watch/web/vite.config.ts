@@ -3,7 +3,20 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import fs from 'node:fs'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 import { resolvePreviewMedia } from './preview-paths'
+import { deriveStatus, lockPath, logPath, parseLock, parseRunnerUrl } from './scrape-runner'
+
+/** Event ids with a definition on disk — the allow-list both dev plugins
+ *  validate browser-sent ids against. Computed HERE, never from the URL. */
+function eventIdsFrom(dir: string): Set<string> {
+  return new Set<string>(
+    fs.existsSync(dir)
+      ? fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
+          .map((f) => path.basename(f, '.json'))
+      : [],
+  )
+}
 
 /**
  * Serves the story preview — the fixtures and the archived media — on the dev
@@ -53,12 +66,7 @@ function storyPreview() {
   const roots = {
     eventsTmp: EVENTS_TMP,
     defaultEvent: 'lowlands-2026',
-    eventIds: new Set<string>(
-      fs.existsSync(EVENTS_DIR)
-        ? fs.readdirSync(EVENTS_DIR).filter((f) => f.endsWith('.json'))
-            .map((f) => path.basename(f, '.json'))
-        : [],
-    ),
+    eventIds: eventIdsFrom(EVENTS_DIR),
   }
 
   function send(res: any, file: string, type: string) {
@@ -92,7 +100,87 @@ function storyPreview() {
   }
 }
 
+/**
+ * The "Opnieuw scrapen" button's backend: two endpoints that exist on the dev
+ * server and NOWHERE ELSE (`apply: 'serve'`, same guarantee as storyPreview —
+ * this code path is not in a build at all).
+ *
+ *   POST /scrape-run/<event>     start tools/stelz_brand_watch/79_verversronde.sh
+ *                                detached; stdout → .tmp/scrape-<event>.log;
+ *                                pid → .tmp/scrape-<event>.lock. 409 while a
+ *                                round is already running — two concurrent
+ *                                rounds would double-bill Apify/Gemini and
+ *                                overwrite each other's fixtures.
+ *   GET  /scrape-status/<event>  {running, stale, exitOk, logTail, fixtureMtime}
+ *
+ * The event id is validated by exact Set membership before it becomes a shell
+ * argument or a file name (see scrape-runner.ts for the rules and the tests).
+ */
+function scrapeRunner() {
+  const ROOT = path.resolve(__dirname, '../../..')
+  const TMP = path.join(ROOT, '.tmp')
+  const SCRIPT = path.join(ROOT, 'tools', 'stelz_brand_watch', '79_verversronde.sh')
+  const eventIds = eventIdsFrom(path.resolve(__dirname, 'src/data/events'))
+
+  const pidAlive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (e) {
+      // EPERM means it exists but is not ours — still alive.
+      return (e as NodeJS.ErrnoException).code === 'EPERM'
+    }
+  }
+  const readIf = (file: string): string | null =>
+    fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null
+  const json = (res: any, code: number, body: unknown) => {
+    res.statusCode = code
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify(body))
+  }
+  const statusOf = (ev: string) => {
+    const pid = parseLock(readIf(lockPath(TMP, ev)))
+    const fixture = path.join(TMP, 'preview-campaign.json')
+    return deriveStatus({
+      lockPid: pid,
+      pidAlive: pid != null && pidAlive(pid),
+      logText: readIf(logPath(TMP, ev)),
+      fixtureMtime: fs.existsSync(fixture) ? fs.statSync(fixture).mtimeMs : null,
+    })
+  }
+
+  return {
+    name: 'stelz-scrape-runner',
+    apply: 'serve' as const,
+    configureServer(server: { middlewares: { use: (fn: (req: any, res: any, next: () => void) => void) => void } }) {
+      server.middlewares.use((req, res, next) => {
+        const url: string = req.url || ''
+
+        const statusEv = parseRunnerUrl(url, '/scrape-status/', eventIds)
+        if (statusEv && req.method === 'GET') return json(res, 200, statusOf(statusEv))
+
+        const runEv = parseRunnerUrl(url, '/scrape-run/', eventIds)
+        if (runEv && req.method === 'POST') {
+          const before = statusOf(runEv)
+          if (before.running) return json(res, 409, { error: 'al bezig' })
+          // A stale lock is a crashed previous round; starting anew replaces it.
+          fs.mkdirSync(TMP, { recursive: true })
+          const fd = fs.openSync(logPath(TMP, runEv), 'w')
+          const child = spawn('bash', [SCRIPT, runEv],
+            { cwd: ROOT, detached: true, stdio: ['ignore', fd, fd] })
+          child.unref()
+          fs.closeSync(fd)
+          fs.writeFileSync(lockPath(TMP, runEv), String(child.pid))
+          return json(res, 200, { started: true, pid: child.pid })
+        }
+
+        return next()
+      })
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss(), storyPreview()],
+  plugins: [react(), tailwindcss(), storyPreview(), scrapeRunner()],
   server: { port: 5173, host: true },
 })

@@ -20,6 +20,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { PageShell, Card } from '../components/ui'
+import { ScrapeButton } from '../components/ScrapeButton'
 import { StoryDetail } from '../components/StoryDetail'
 import { StoriesView } from './Stories'
 import { PasteImport } from '../components/PasteImport'
@@ -216,16 +217,22 @@ function EventBody({ ev, params, setParams }: {
       subtitle={`${formatWindow(ev)} · ${ev.venue}`}
       crumbs={[{ label: 'Evenementen', to: '/evenementen' }]}
       actions={
-        <span className={`text-[10px] uppercase tracking-wider px-2 py-1 ${STATUS_TONE[status]}`}>
-          {status}
-        </span>
+        <>
+          {/* Dev server only — the scrape pipeline lives on this machine, and
+              the endpoints behind the button exist only in `vite dev`. Inline
+              DEV gate so the build folds the whole render site away. */}
+          {import.meta.env.DEV && <ScrapeButton eventId={ev.id} />}
+          <span className={`text-[10px] uppercase tracking-wider px-2 py-1 ${STATUS_TONE[status]}`}>
+            {status}
+          </span>
+        </>
       }
     >
       {preview && (
         <Card className="mb-4 px-4 py-2.5 text-[12px] text-[var(--color-warn)]">
-          Preview: echt gescrapte content uit een lokaal bestand, niet uit de database.
-          De oordelen komen uit een lokale analyse met hetzelfde model en dezelfde
-          referentiefoto's als productie.
+          Lokale data: rechtstreeks van de laatste scrape op deze computer, nog niet
+          uit de online database. De oordelen komen uit de lokale analyse met hetzelfde
+          model en dezelfde referentiefoto's als productie.
         </Card>
       )}
 
@@ -665,17 +672,14 @@ function EmptyState({ ev }: { ev: StelzEvent }) {
         scans niet zijn uitgerold, wordt hij gevuld met{' '}
         <code className="text-[11px]">72_campaign_fixture.py --event {ev.id}</code>.
       </p>
-      {/* Dev server only — folded out of a production build along with the URL
-          it names. Typing a query parameter you have to be told about is not a
-          way to find a page; on localhost the empty state IS the signpost. */}
+      {/* Dev server only — folded out of a production build. Local data shows
+          automatically now (no query parameter); an empty page here means no
+          scrape ever ran on this machine, and the button is the way out. */}
       {import.meta.env.DEV && (
-        <p className="mt-4">
-          <a
-            href={`/evenementen/${ev.id}?preview=campaign`}
-            className="text-[12px] underline hover:text-[var(--color-ink)]"
-          >
-            Lokale preview openen →
-          </a>
+        <p className="mt-4 text-[12px] text-[var(--color-ink-subtle)]">
+          Op deze computer nog niets gescraped — gebruik{' '}
+          <strong className="font-medium text-[var(--color-ink)]">Opnieuw scrapen</strong>{' '}
+          rechtsboven om de eerste ronde te draaien.
         </p>
       )}
     </Card>

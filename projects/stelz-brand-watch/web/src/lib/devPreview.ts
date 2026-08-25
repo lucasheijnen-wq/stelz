@@ -36,6 +36,22 @@ export function matchesPreview(search: string, kind: PreviewKind): boolean {
   return new URLSearchParams(search).get('preview') === kind
 }
 
+/** Should this preview kind be live for this URL?
+ *
+ *  The two kinds default differently, on purpose. The campaign fixtures are the
+ *  ONLY local source for the event pages — without them the pages show an empty
+ *  production database, which read as "my scraped data is gone" every time
+ *  someone opened the page without the magic parameter. So campaign is ON by
+ *  default in dev, with `?preview=off` as the escape hatch. Stories fixtures
+ *  would instead MASK live Firestore data on the stories surfaces, so they stay
+ *  strictly opt-in via the exact-match rule above. */
+export function previewWanted(search: string, kind: PreviewKind): boolean {
+  if (kind === 'campaign') {
+    return new URLSearchParams(search).get('preview') !== 'off'
+  }
+  return matchesPreview(search, kind)
+}
+
 /**
  * ONE fetch in this file, and every hook goes through it.
  *
@@ -54,21 +70,31 @@ export function matchesPreview(search: string, kind: PreviewKind): boolean {
 function usePreviewFixture<T>(
   file: string, kind: PreviewKind,
   accept: (data: unknown) => boolean = Array.isArray,
+  empty?: T,
 ): T | null {
+  // `empty` is what a MISSING fixture resolves to. Undefined (the default)
+  // keeps the old behaviour: stay null, let the caller fall back to live data.
+  // The campaign hooks pass a settled empty value instead, because since
+  // campaign preview became default-on a null that never resolves would leave
+  // the event pages loading forever on a machine without fixtures.
   const [rows, setRows] = useState<T | null>(null)
   useEffect(() => {
     // Inline, not extracted — see rule 1 above. Both checks have to sit in the
     // block they guard for the minifier to fold them away.
     if (!import.meta.env.DEV) return
     if (!file) return
-    if (!matchesPreview(window.location.search, kind)) return
+    if (!previewWanted(window.location.search, kind)) return
     let cancelled = false
     void fetch(file)
       .then((r) => (r.ok ? r.json() : null))
-      .then((data) => { if (!cancelled && accept(data)) setRows(data as T) })
-      .catch(() => { /* no fixture generated yet — stay on live data */ })
+      .then((data) => {
+        if (cancelled) return
+        if (accept(data)) setRows(data as T)
+        else if (empty !== undefined) setRows(empty)
+      })
+      .catch(() => { if (!cancelled && empty !== undefined) setRows(empty) })
     return () => { cancelled = true }
-  }, [file, kind, accept])
+  }, [file, kind, accept, empty])
   return rows
 }
 
@@ -98,17 +124,24 @@ export function useStoryPostsPreview(): StoryPost[] | null {
     import.meta.env.DEV ? '/preview-story-posts.json' : '', 'stories')
 }
 
+/** Stable settled-empty value for the campaign hooks. A fresh `[]` at the call
+ *  site would be a new reference every render and re-run the effect forever
+ *  through the dependency array. */
+const NO_FIXTURE: never[] = []
+
 /** Campaign items — IG stories, IG posts and TikToks in one list. */
 export function useCampaignPreview(): CampaignItem[] | null {
   return usePreviewFixture<CampaignItem[]>(
-    import.meta.env.DEV ? '/preview-campaign.json' : '', 'campaign')
+    import.meta.env.DEV ? '/preview-campaign.json' : '', 'campaign',
+    Array.isArray, NO_FIXTURE)
 }
 
 /** The verdicts that go with them. Both halves or neither — see
  *  storyStats.storySource for what happens when only one arrives. */
 export function useCampaignDetectionsPreview(): DetectionRow[] | null {
   return usePreviewFixture<DetectionRow[]>(
-    import.meta.env.DEV ? '/preview-campaign-detections.json' : '', 'campaign')
+    import.meta.env.DEV ? '/preview-campaign-detections.json' : '', 'campaign',
+    Array.isArray, NO_FIXTURE)
 }
 
 /** The audience layer: commenters, tagged accounts, festival-goer profiles.

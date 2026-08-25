@@ -13,7 +13,7 @@
 
 import { useEffect, useState } from 'react'
 import {
-  useAudiencePreview, useCampaignDetectionsPreview, useCampaignPreview, matchesPreview,
+  useAudiencePreview, useCampaignDetectionsPreview, useCampaignPreview, previewWanted,
 } from './devPreview'
 import {
   fbFetchEventAudience, fbFetchEventCampaign, type EventCampaign,
@@ -24,9 +24,12 @@ import type { DetectionRow } from './types'
 
 /** Is the preview switch on for this tab? Synchronous on purpose: the preview
  *  FETCH is async, and starting a live Firestore read in the gap before the
- *  fixture arrives would flash live rows under a preview banner. */
+ *  fixture arrives would flash live rows under a preview banner. Campaign
+ *  preview is default-ON in dev (see previewWanted) — the local fixtures are
+ *  the only data source for these pages until the one-time production import
+ *  runs, and `?preview=off` remains the escape hatch to see the live rows. */
 function previewActive(): boolean {
-  return import.meta.env.DEV && matchesPreview(window.location.search, 'campaign')
+  return import.meta.env.DEV && previewWanted(window.location.search, 'campaign')
 }
 
 export function useEventCampaign(eventId: string | null): {
@@ -57,7 +60,9 @@ export function useEventCampaign(eventId: string | null): {
 
   if (previewActive()) {
     return {
-      items: previewItems,
+      // A settled-but-empty fixture (no scrape ran on this machine yet) maps to
+      // null so the page shows its empty state instead of a zero-item grid.
+      items: previewItems && previewItems.length > 0 ? previewItems : null,
       detections: previewDets ?? [],
       preview: true,
       loading: previewItems == null,
