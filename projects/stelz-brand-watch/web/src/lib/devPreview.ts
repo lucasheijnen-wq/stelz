@@ -52,10 +52,33 @@ export function previewWanted(search: string, kind: PreviewKind): boolean {
   return matchesPreview(search, kind)
 }
 
+/** One settled promise per fixture path, for the whole page session. The two
+ *  campaign files are 12,6 MB together and every hook instance used to pull
+ *  its own copy — the events LIST page alone paid that bill twice per row,
+ *  doubled again by StrictMode. The production path caches for exactly this
+ *  reason (see firestore.ts, fbFetchEventCampaign); since the fixture path
+ *  became the dev default it deserves the same. A scrape round ends in a full
+ *  page reload, which resets this cache along with the module. */
+const FIXTURE_CACHE = new Map<string, Promise<unknown>>()
+
+function loadFixture(file: string): Promise<unknown> {
+  // Inline, not extracted — see rule 1 above; the gate must sit directly ahead
+  // of the request it guards for the minifier to fold the block away.
+  if (!import.meta.env.DEV) return Promise.resolve(null)
+  let p = FIXTURE_CACHE.get(file)
+  if (!p) {
+    p = fetch(file)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null)
+    FIXTURE_CACHE.set(file, p)
+  }
+  return p
+}
+
 /**
- * ONE fetch in this file, and every hook goes through it.
+ * ONE network request in this file, and every hook goes through it.
  *
- * Not tidiness — devPreview.test.ts asserts there is exactly one call to it in
+ * Not tidiness — devPreview.test.ts asserts there is exactly one call site in
  * this file, and that assertion is what stands between a preview switch and a
  * data-exfiltration switch in a client dashboard. A hook that opened its own
  * would be a second place where the DEV gate has to be got right, and the
@@ -79,20 +102,15 @@ function usePreviewFixture<T>(
   // the event pages loading forever on a machine without fixtures.
   const [rows, setRows] = useState<T | null>(null)
   useEffect(() => {
-    // Inline, not extracted — see rule 1 above. Both checks have to sit in the
-    // block they guard for the minifier to fold them away.
     if (!import.meta.env.DEV) return
     if (!file) return
     if (!previewWanted(window.location.search, kind)) return
     let cancelled = false
-    void fetch(file)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (cancelled) return
-        if (accept(data)) setRows(data as T)
-        else if (empty !== undefined) setRows(empty)
-      })
-      .catch(() => { if (!cancelled && empty !== undefined) setRows(empty) })
+    void loadFixture(file).then((data) => {
+      if (cancelled) return
+      if (accept(data)) setRows(data as T)
+      else if (empty !== undefined) setRows(empty)
+    })
     return () => { cancelled = true }
   }, [file, kind, accept, empty])
   return rows
@@ -124,10 +142,13 @@ export function useStoryPostsPreview(): StoryPost[] | null {
     import.meta.env.DEV ? '/preview-story-posts.json' : '', 'stories')
 }
 
-/** Stable settled-empty value for the campaign hooks. A fresh `[]` at the call
- *  site would be a new reference every render and re-run the effect forever
- *  through the dependency array. */
-const NO_FIXTURE: never[] = []
+/** Stable settled-empty values. A fresh `[]`/`{}` at the call site would be a
+ *  new reference every render and re-run the effect forever through the
+ *  dependency array. Exported so eventData can RECOGNISE "the fixture is
+ *  missing on this machine" by reference and fall back to the live Firestore
+ *  rows — the fresh-clone experience used to dead-end on an empty state. */
+export const NO_FIXTURE: never[] = []
+export const NO_AUDIENCE = Object.freeze({}) as unknown as Audience
 
 /** Campaign items — IG stories, IG posts and TikToks in one list. */
 export function useCampaignPreview(): CampaignItem[] | null {
@@ -150,5 +171,6 @@ export function useCampaignDetectionsPreview(): DetectionRow[] | null {
  *  cost. An object rather than an array, hence the `isAudience` check. */
 export function useAudiencePreview(): Audience | null {
   return usePreviewFixture<Audience>(
-    import.meta.env.DEV ? '/preview-audience.json' : '', 'campaign', isAudience)
+    import.meta.env.DEV ? '/preview-audience.json' : '', 'campaign', isAudience,
+    NO_AUDIENCE)
 }

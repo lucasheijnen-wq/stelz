@@ -8,7 +8,7 @@
 // hands that file out, and the failure is silent: it looks like a working
 // image server right up until someone types the right URL.
 import { describe, expect, it } from 'vitest'
-import { resolvePreviewMedia, ARCHIVE_KINDS } from '../../preview-paths'
+import { parseByteRange, resolvePreviewMedia, ARCHIVE_KINDS } from '../../preview-paths'
 
 const roots = {
   eventsTmp: '/repo/.tmp/events',
@@ -102,5 +102,28 @@ describe('what it refuses', () => {
 
   it('refuses a malformed escape instead of passing the raw bytes on', () => {
     expect(at('/preview-media/%zz/tiktok/x.jpg')).toBeNull()
+  })
+})
+
+describe('parseByteRange', () => {
+  it('serves videos in pieces — the browser cannot seek without 206', () => {
+    expect(parseByteRange('bytes=0-99', 1000)).toEqual({ start: 0, end: 99 })
+    expect(parseByteRange('bytes=500-', 1000)).toEqual({ start: 500, end: 999 })
+    expect(parseByteRange('bytes=-100', 1000)).toEqual({ start: 900, end: 999 })
+    // An end past the file clamps instead of erroring — per RFC 9110.
+    expect(parseByteRange('bytes=900-5000', 1000)).toEqual({ start: 900, end: 999 })
+  })
+
+  it('falls back to the whole file on anything it does not implement', () => {
+    expect(parseByteRange(undefined, 1000)).toBeNull()
+    expect(parseByteRange('bytes=', 1000)).toBeNull()
+    expect(parseByteRange('bytes=abc-def', 1000)).toBeNull()
+    expect(parseByteRange('bytes=0-99,200-299', 1000)).toBeNull()  // multi-range
+    expect(parseByteRange('bytes=50-10', 1000)).toBeNull()         // inverted
+  })
+
+  it('answers 416 for a range that starts past the end', () => {
+    expect(parseByteRange('bytes=1000-', 1000)).toBe('unsatisfiable')
+    expect(parseByteRange('bytes=-0', 1000)).toBe('unsatisfiable')
   })
 })

@@ -35,6 +35,15 @@ import importlib.util
 import sys
 from pathlib import Path
 
+
+def _write_atomic(path: Path, text: str) -> None:
+    """tmp + rename. De dev-server streamt deze bestanden terwijl wij ze
+    herbouwen; een afgekapte 200 rendert als "Nog geen data" over een vol
+    archief. os.replace is atomair op hetzelfde filesystem."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
 import requests
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -333,8 +342,8 @@ def main() -> int:
 
     handles = sorted({r["creator_handle"] for r in rows})
     print(f"  from {len(handles)} accounts: {', '.join(handles)}")
-    OUT.write_text(json.dumps(rows, indent=1))
-    OUT_POSTS.write_text(json.dumps(posts, indent=1))
+    _write_atomic(OUT, json.dumps(rows, indent=1))
+    _write_atomic(OUT_POSTS, json.dumps(posts, indent=1))
     polls = sum(p["pollVotes"] for p in posts)
     print(f"\n  wrote {OUT.relative_to(ROOT)} and {OUT_POSTS.relative_to(ROOT)}")
     judged = len(rows)

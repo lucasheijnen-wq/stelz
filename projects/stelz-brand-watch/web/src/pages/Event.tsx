@@ -252,7 +252,9 @@ function EventBody({ ev, params, setParams }: {
 
       {/* THE DENOMINATOR OF THE WHOLE PAGE. Without this line a reader watches
           most of the archive vanish and reads it as a broken scrape. */}
-      <Card className="mb-4 px-4 py-3 text-[12px] text-[var(--color-ink-muted)] leading-relaxed border-l-2 border-[var(--color-border-strong)]">
+      {/* Not while loading: "0 van 0 stuks content" as a statement of fact
+          over a harvested festival is a lie with a card around it. */}
+      {!campaignLoading && <Card className="mb-4 px-4 py-3 text-[12px] text-[var(--color-ink-muted)] leading-relaxed border-l-2 border-[var(--color-border-strong)]">
         <strong className="font-medium text-[var(--color-ink)]">
           {fmtNum(rows.length)} van {fmtNum(allRows.length)} stuks content vallen binnen{' '}
           {formatWindow(ev)}.
@@ -273,7 +275,7 @@ function EventBody({ ev, params, setParams }: {
             {' '}— je kijkt nu naar alles, ook buiten {ev.name}.
           </span>
         )}
-      </Card>
+      </Card>}
 
       {/* ABOVE THE TABS, ON PURPOSE. "How is Stëlz doing on social" is not a
           question about the roster tab or the discovery tab — it is what the
@@ -327,7 +329,7 @@ function EventBody({ ev, params, setParams }: {
       ) : allRows.length === 0 ? (
         <EmptyState ev={ev} />
       ) : tab === 'publiek' ? (
-        <AudienceTab audience={audience} />
+        <AudienceTab audience={audience} eventId={ev.id} />
       ) : tab === 'cijfers' ? (
         <NumbersTab
           rows={scopeRows}
@@ -600,24 +602,29 @@ function SettingsTab({ ev, project, canWrite, onChanged }: {
       <Card className="p-5">
         <h2 className="text-[15px] text-[var(--color-ink)] mb-1">Oogsten</h2>
         <p className="text-[12px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mb-3">
-          De scrapers draaien lokaal, want de Cloud Functions staan niet uitgerold. Stories
-          verdwijnen na 24 uur en komen nooit terug — die sweep is de enige die haast heeft.
+          In het <strong className="text-[var(--color-ink)]">lokale dashboard</strong> (waar de
+          scrapers draaien) zit rechtsboven de knop{' '}
+          <strong className="text-[var(--color-ink)]">Opnieuw scrapen</strong>: alle vier de
+          archieven verversen, alles nieuws beoordelen, en het dashboard bijwerken. Voortgang
+          staat onder de knop; het volledige log in{' '}
+          <code className="text-[11px]">.tmp/scrape-{ev.id}.log</code>. Stories verdwijnen na
+          24 uur en komen nooit terug — die stap is de enige die haast heeft.
+        </p>
+        <p className="text-[12px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mb-3">
+          Handmatig kan ook; dit is exact wat de knop uitvoert:
         </p>
         <pre className="text-[11px] bg-[var(--color-surface-2)] p-3 overflow-x-auto leading-relaxed">
-{`62_stories_archive.py   --event ${ev.id}
-70_tiktok_archive.py    --event ${ev.id} --per-handle 30
-71_ig_posts_archive.py  --event ${ev.id} --per-handle 25 --since ${win.start}
-73_lowlands_discovery.py --event ${ev.id} --since ${win.start}
+{`tools/stelz_brand_watch/79_verversronde.sh ${ev.id}
 
-74_analyse.py --event ${ev.id} --archive stories   --max-dim 0
-74_analyse.py --event ${ev.id} --archive ig-posts  --max-dim 0
-74_analyse.py --event ${ev.id} --archive tiktok    --max-dim 0
-74_analyse.py --event ${ev.id} --archive discovery --max-dim 0`}
+# = 62_stories → 70_tiktok → 71_ig_posts (--per-handle 4, laatste 7 dagen)
+#   → 73_discovery → 74_analyse ×4 (--max-dim 0, verplicht)
+#   → 72_campaign_fixture → 76_audience → 61_stories_preview → 77_voortgang`}
         </pre>
         <p className="text-[11px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mt-3">
-          <code>--max-dim 0</code> altijd meegeven. De standaard is 512, de resolutie van de
-          uitgerolde functie; zonder de vlag daalt het aantal treffers en ziet dat eruit als
-          een merk dat minder zichtbaar werd.
+          De laatste vier stappen zijn wat het scherm ververst — losse scrapes zonder die
+          stappen laten de pagina ongewijzigd. <code>--max-dim 0</code> is in het script
+          vastgezet: de standaard is 512 en een gemengd archief lijkt op een merk dat minder
+          zichtbaar werd.
         </p>
       </Card>
 

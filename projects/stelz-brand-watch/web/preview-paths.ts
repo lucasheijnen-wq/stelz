@@ -91,3 +91,35 @@ export function resolvePreviewMedia(
 
   return { file: path.join(dir, name), type }
 }
+
+/**
+ * Parse an HTTP Range header against a file size.
+ *
+ * Videos are why this exists: without 206 support Safari refuses to play a
+ * `<video>` at all and Chrome cannot seek. The middleware used to pipe whole
+ * files with no `Accept-Ranges`, which made half the archive (the videos)
+ * unplayable in the drawer.
+ *
+ * @returns byte bounds to serve with 206; null to serve the whole file with
+ * 200 (no header, malformed header, or a multi-range we choose not to
+ * implement); 'unsatisfiable' to answer 416.
+ */
+export function parseByteRange(
+  header: string | undefined,
+  size: number,
+): { start: number; end: number } | null | 'unsatisfiable' {
+  if (!header || size <= 0) return null
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
+  if (!m || (!m[1] && !m[2])) return null
+  if (!m[1]) {
+    // Suffix form: the LAST n bytes.
+    const n = Number.parseInt(m[2], 10)
+    if (n === 0) return 'unsatisfiable'
+    return { start: Math.max(0, size - n), end: size - 1 }
+  }
+  const start = Number.parseInt(m[1], 10)
+  if (start >= size) return 'unsatisfiable'
+  const end = m[2] ? Math.min(Number.parseInt(m[2], 10), size - 1) : size - 1
+  if (end < start) return null
+  return { start, end }
+}

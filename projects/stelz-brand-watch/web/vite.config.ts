@@ -4,7 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { resolvePreviewMedia } from './preview-paths'
+import { parseByteRange, resolvePreviewMedia } from './preview-paths'
 import { deriveStatus, lockPath, logPath, parseLock, parseRunnerUrl } from './scrape-runner'
 
 /** Event ids with a definition on disk — the allow-list both dev plugins
@@ -69,13 +69,30 @@ function storyPreview() {
     eventIds: eventIdsFrom(EVENTS_DIR),
   }
 
-  function send(res: any, file: string, type: string) {
+  function send(res: any, file: string, type: string, rangeHeader?: string) {
     if (!fs.existsSync(file)) {
       res.statusCode = 404
       return res.end('not found')
     }
+    const size = fs.statSync(file).size
     res.setHeader('Content-Type', type)
     res.setHeader('Cache-Control', 'no-store')
+    res.setHeader('Accept-Ranges', 'bytes')
+    const range = parseByteRange(rangeHeader, size)
+    if (range === 'unsatisfiable') {
+      res.statusCode = 416
+      res.setHeader('Content-Range', `bytes */${size}`)
+      return res.end()
+    }
+    if (range) {
+      res.statusCode = 206
+      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`)
+      res.setHeader('Content-Length', String(range.end - range.start + 1))
+      return fs.createReadStream(file, { start: range.start, end: range.end }).pipe(res)
+    }
+    // Content-Length also lets the browser NOTICE a truncated body instead of
+    // silently parsing half a fixture as "no data".
+    res.setHeader('Content-Length', String(size))
     fs.createReadStream(file).pipe(res)
   }
 
@@ -86,7 +103,7 @@ function storyPreview() {
       server.middlewares.use((req, res, next) => {
         const url: string = (req.url || '').split('?')[0]
         const fixture = FIXTURES[url]
-        if (fixture) return send(res, fixture, 'application/json')
+        if (fixture) return send(res, fixture, 'application/json', req.headers?.range)
         if (!url.startsWith('/preview-media/')) return next()
 
         const hit = resolvePreviewMedia(url, roots)
@@ -94,7 +111,7 @@ function storyPreview() {
           res.statusCode = 404
           return res.end('not found')
         }
-        return send(res, hit.file, hit.type)
+        return send(res, hit.file, hit.type, req.headers?.range)
       })
     },
   }
@@ -158,6 +175,17 @@ function scrapeRunner() {
 
         const statusEv = parseRunnerUrl(url, '/scrape-status/', eventIds)
         if (statusEv && req.method === 'GET') return json(res, 200, statusOf(statusEv))
+
+        const stopEv = parseRunnerUrl(url, '/scrape-stop/', eventIds)
+        if (stopEv && req.method === 'POST') {
+          const pid = parseLock(readIf(lockPath(TMP, stopEv)))
+          if (pid == null || !pidAlive(pid)) return json(res, 404, { error: 'geen lopende ronde' })
+          // detached spawn = its own process group; negative pid stops the
+          // whole pipeline (bash + whichever python step is underway).
+          try { process.kill(-pid, 'SIGTERM') } catch { try { process.kill(pid, 'SIGTERM') } catch { /* al weg */ } }
+          fs.rmSync(lockPath(TMP, stopEv), { force: true })
+          return json(res, 200, { stopped: true })
+        }
 
         const runEv = parseRunnerUrl(url, '/scrape-run/', eventIds)
         if (runEv && req.method === 'POST') {

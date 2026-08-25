@@ -83,7 +83,7 @@ function EventRow({ ev, project }: {
   // Firestore rows in production — see lib/eventData). Before this the list
   // could only see the preview fixture, so production showed 0 / 0 / 0 over a
   // fully harvested festival.
-  const { items, detections } = useEventCampaign(ev.id)
+  const { items, detections, preview, loading } = useEventCampaign(ev.id)
   const rows = useMemo(
     () => joinCampaign(items ?? ([] as CampaignItem[]), detections),
     [items, detections],
@@ -120,6 +120,14 @@ function EventRow({ ev, project }: {
             <span className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 ${STATUS_TONE[status]}`}>
               {status}
             </span>
+            {/* The numbers to the right must never pass for production data
+                when they come from the local fixture — same honesty rule as
+                the banner on the detail page. */}
+            {preview && (
+              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 border border-[var(--color-warn)] text-[var(--color-warn)]">
+                lokale data
+              </span>
+            )}
           </div>
           <div className="text-[12px] text-[var(--color-ink-subtle)]">
             {formatWindow(ev)} · {ev.venue}
@@ -135,20 +143,23 @@ function EventRow({ ev, project }: {
           </div>
         </div>
         <div className="flex gap-6 text-right shrink-0">
-          <Figure value={stats.hits} label="met Stëlz" />
-          <Figure value={stats.roster} label="van de roster" />
-          <Figure value={stats.discovery} label="los gevonden" />
+          {/* A dash while loading — a momentary "0 met Stëlz" over a finished
+              festival reads as a broken scrape, which is the exact misread
+              this row exists to prevent. */}
+          <Figure value={loading ? null : stats.hits} label="met Stëlz" />
+          <Figure value={loading ? null : stats.roster} label="van de roster" />
+          <Figure value={loading ? null : stats.discovery} label="los gevonden" />
         </div>
       </div>
     </Card>
   )
 }
 
-function Figure({ value, label }: { value: number; label: string }) {
+function Figure({ value, label }: { value: number | null; label: string }) {
   return (
     <div>
       <div className="stelz-display text-[20px] leading-none text-[var(--color-ink)] tabular-nums">
-        {fmtNum(value)}
+        {value == null ? '—' : fmtNum(value)}
       </div>
       <div className="text-[10px] text-[var(--color-ink-subtle)] mt-1">{label}</div>
     </div>
@@ -235,9 +246,11 @@ function NewEvent({ projects }: { projects: Project[] }) {
         {json}
       </pre>
       <p className="text-[11px] text-[var(--color-ink-subtle)] mt-3 leading-relaxed">
-        Daarna oogsten met{' '}
-        <code>--event {slug || 'nieuw-evenement'}</code> in 62, 70, 71 en 73, en analyseren met{' '}
-        <code>74_analyse.py --event {slug || 'nieuw-evenement'} --archive … --max-dim 0</code>.
+        Daarna oogsten met de knop <strong>Opnieuw scrapen</strong> op de evenementpagina van
+        het lokale dashboard, of handmatig met{' '}
+        <code>tools/stelz_brand_watch/79_verversronde.sh {slug || 'nieuw-evenement'}</code>{' '}
+        (zelfde pijplijn, inclusief de dashboard-stappen). Let op: de dev-server leest de
+        evenementenlijst bij het opstarten — herstart hem één keer na het toevoegen.
       </p>
     </Card>
   )

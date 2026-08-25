@@ -16,6 +16,8 @@ describe('parseRunnerUrl', () => {
       .toBe('lowlands-2026')
     expect(parseRunnerUrl('/scrape-status/pinkpop-2027', '/scrape-status/', events))
       .toBe('pinkpop-2027')
+    expect(parseRunnerUrl('/scrape-stop/lowlands-2026', '/scrape-stop/', events))
+      .toBe('lowlands-2026')
   })
 
   it('ignores a query string', () => {
@@ -87,5 +89,53 @@ describe('deriveStatus', () => {
     const s = deriveStatus({ ...base, logText: log })
     expect(s.logTail.length).toBe(15)
     expect(s.logTail.at(-1)).toBe('regel 39')
+  })
+
+  it('counts failed steps — the runner keeps going, the status must not hide it', () => {
+    const log = [
+      '[t] → 62_stories_archive.py --event lowlands-2026',
+      '[t] 62_stories_archive.py faalde — door naar de volgende stap',
+      '[t] → 70_tiktok_archive.py --event lowlands-2026',
+      `[t] ${DONE_MARKER}`,
+    ].join('\n')
+    const s = deriveStatus({ ...base, logText: log })
+    expect(s.failedSteps).toBe(1)
+    // The marker was reached, but "finished" and "finished cleanly" differ.
+    expect(s.exitOk).toBe(true)
+  })
+
+  it('sums the three harvester counter spellings into one yield number', () => {
+    // Real lines from the 25 aug round: 62, 70/71 and 73 each spell their
+    // counter differently. All of them are new items.
+    const log = [
+      '  archived 4 new · 49 already had · 0 not stories',
+      '  +12 new · 708 already archived · 1050 in .tmp/events/lowlands-2026/tiktok',
+      '  +0 new · 0 already archived · 0 older than --since',
+      '18 nieuw · 3 al gearchiveerd · 2 van roster-creators (overgeslagen) · 1 te oud',
+    ].join('\n')
+    expect(deriveStatus({ ...base, logText: log }).newItems).toBe(34)
+    // No counter line seen at all → null, not zero: "nothing reported yet"
+    // and "zero new" are different facts.
+    expect(deriveStatus({ ...base, logText: 'bezig…' }).newItems).toBeNull()
+  })
+
+  it('filters SDK noise out of the tail — hundreds of AFC warnings per step', () => {
+    const noise = 'Direct use of automatic function calling (AFC) in Models.generate_content is not recommended.'
+    const log = ['[t] → 74_analyse.py --event x --archive stories --max-dim 0', noise, noise].join('\n')
+    const s = deriveStatus({ ...base, logText: log })
+    expect(s.lastLine).toContain('74_analyse.py')
+    expect(s.logTail.some((l) => l.includes('AFC'))).toBe(false)
+  })
+
+  it('derives the current step from the last "→ script" line', () => {
+    const log = [
+      '[t] verversronde start — lowlands-2026, nieuwe posts sinds 2026-08-18',
+      '[t] → 62_stories_archive.py --event lowlands-2026',
+      '[t] → 74_analyse.py --event lowlands-2026 --archive ig-posts --max-dim 0',
+    ].join('\n')
+    const s = deriveStatus({ ...base, lockPid: 9, pidAlive: true, logText: log })
+    expect(s.currentStep).toEqual({ index: 7, total: 12, label: 'analyse: Instagram-posts' })
+    expect(s.lastLine).toContain('74_analyse.py')
+    expect(deriveStatus(base).currentStep).toBeNull()
   })
 })

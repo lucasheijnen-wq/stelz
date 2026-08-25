@@ -38,8 +38,18 @@ import argparse
 import collections
 import importlib.util
 import json
+import os
 import re
 from pathlib import Path
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """tmp + rename. De dev-server streamt deze bestanden terwijl wij ze
+    herbouwen; een afgekapte 200 rendert als "Nog geen data" over een vol
+    archief. os.replace is atomair op hetzelfde filesystem."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 _espec = importlib.util.spec_from_file_location(
     "_events", Path(__file__).with_name("_events.py"))
@@ -364,7 +374,7 @@ def main() -> int:
         "context": ctx,
     }
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1))
+    _write_atomic(OUT, json.dumps(out, ensure_ascii=False, indent=1))
 
     print(f"\n  reageerders : {c_stats['people']:,} mensen · {c_stats['comments']:,} reacties"
           f" · {c_stats['shared']} op 2+ creators")
@@ -381,7 +391,7 @@ def main() -> int:
     print(f"  sounds      : {ctx['soundsDistinct']:,} unieke")
     print(f"\n  wrote {OUT.relative_to(ROOT)}")
     print("  open http://localhost:5173/evenementen/"
-          f"{ev['id']}?preview=campaign&tab=publiek")
+          f"{ev['id']}?tab=publiek")
     return 0
 
 
