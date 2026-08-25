@@ -44,9 +44,8 @@ import {
 import { fbFetchCreatorProfiles, type CreatorProfile } from '../lib/firestore'
 import { fetchProjects, projectsAction, type Project } from '../lib/data'
 import { useMembership } from '../lib/membershipContext'
-import type { DetectionRow } from '../lib/types'
 import { fmtNum, compactNum } from '../lib/format'
-import { useCampaignPreview, useCampaignDetectionsPreview, useAudiencePreview } from '../lib/devPreview'
+import { useEventAudience, useEventCampaign } from '../lib/eventData'
 
 type Tab = 'roster' | 'discovery' | 'cijfers' | 'publiek' | 'stories' | 'settings'
 
@@ -107,9 +106,11 @@ function EventBody({ ev, params, setParams }: {
   const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState<CampaignRow | null>(null)
 
-  const previewItems = useCampaignPreview()
-  const previewDetections = useCampaignDetectionsPreview()
-  const audience = useAudiencePreview()
+  // Preview in dev, the imported Firestore rows in production — one hook,
+  // same downstream pipeline either way. See lib/eventData.
+  const { items: campaignItems, detections: campaignDetections,
+          preview, loading: campaignLoading } = useEventCampaign(ev.id)
+  const audience = useEventAudience(ev.id)
 
   useEffect(() => {
     let cancelled = false
@@ -136,15 +137,12 @@ function EventBody({ ev, params, setParams }: {
     () => [...new Set(ev.roster.map((m) => m.instagram.toLowerCase()))],
     [ev])
 
-  // Preview-only for now, and deliberately not faked from a partial live
-  // source. The three surfaces live in the posts collection and the only
-  // fetcher that exists reads `contentType == 'story'`, so a "live" version
-  // today would show stories and silently claim TikTok and feed posts were
-  // empty — the exact failure this page exists to cure.
+  // All three surfaces, wherever the rows came from (preview fixture or the
+  // imported Firestore set) — never a partial live source that would show
+  // stories while silently claiming TikTok and feed posts were empty.
   const allRows = useMemo(
-    () => joinCampaign(previewItems ?? ([] as CampaignItem[]),
-                       previewDetections ?? ([] as DetectionRow[])),
-    [previewItems, previewDetections],
+    () => joinCampaign(campaignItems ?? ([] as CampaignItem[]), campaignDetections),
+    [campaignItems, campaignDetections],
   )
 
   // ATTRIBUTION, ONCE, BEFORE ANYTHING IS COUNTED. matchEvent decides both
@@ -223,7 +221,7 @@ function EventBody({ ev, params, setParams }: {
         </span>
       }
     >
-      {previewItems && (
+      {preview && (
         <Card className="mb-4 px-4 py-2.5 text-[12px] text-[var(--color-warn)]">
           Preview: echt gescrapte content uit een lokaal bestand, niet uit de database.
           De oordelen komen uit een lokale analyse met hetzelfde model en dezelfde
@@ -306,7 +304,7 @@ function EventBody({ ev, params, setParams }: {
         })}
       </div>
 
-      {loading && allRows.length === 0 && tab !== 'settings' ? (
+      {(loading || campaignLoading) && allRows.length === 0 && tab !== 'settings' ? (
         <Card className="p-14 text-center text-[13px] text-[var(--color-ink-subtle)]">Laden…</Card>
       ) : tab === 'stories' ? (
         <StoriesView

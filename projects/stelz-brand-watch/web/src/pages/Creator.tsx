@@ -25,7 +25,7 @@ import { ContentCard } from '../components/campaign/ContentCard'
 import { srsLayers, srsMode, srsHeadline, MODE_BLURB } from '../lib/srs'
 import { sceneBreakdown } from '../lib/scenes'
 import { ReadOnlyNotice } from '../lib/membership'
-import { useCampaignPreview, useCampaignDetectionsPreview } from '../lib/devPreview'
+import { useEventCampaign } from '../lib/eventData'
 import {
   joinCampaign, campaignRollup, SURFACE_LABEL, SURFACES,
   type CampaignRow,
@@ -50,8 +50,6 @@ export default function Creator() {
   // het resonantie-doc is zo vers als de laatste SRS-run.
   const [profileRecord, setProfileRecord] = useState<{ followerCount: number | null; bio: string | null; avatarUrl: string | null; fullName: string | null } | null>(null)
 
-  const previewItems = useCampaignPreview()
-  const previewDetections = useCampaignDetectionsPreview()
 
   // Een andere creator betekent: het vorige antwoord is niet meer van
   // toepassing. Dat hoort in de render, niet in het effect — als effect stond
@@ -92,16 +90,24 @@ export default function Creator() {
   // bevinding met een naam eraan, in plaats van een lege pagina.
   const booking = useMemo(() => bookingFor(h), [h])
 
+  // Campagnerijen: preview in dev, de geïmporteerde Firestore-rijen in
+  // productie (lib/eventData). Gekozen evenement: waar deze persoon geboekt
+  // is, anders het eerste — met één evenement in de definitie dekt dat alles,
+  // en een tweede evenement krijgt zijn eigen boeking.
+  const campaignEventId = booking?.event.id ?? EVENTS[0]?.id ?? null
+  const { items: campaignItems, detections: campaignDetections } =
+    useEventCampaign(campaignEventId)
+
   // Alles wat deze persoon binnen een evenement plaatste. Op creatorHandle én
   // platformHandle, want bij een samenwerkingspost is de tweede het account van
   // de co-auteur en de eerste de geboekte creator — beide moeten hier uitkomen.
   const mine = useMemo(() => {
-    if (!previewItems || !previewDetections) return [] as CampaignRow[]
-    return joinCampaign(previewItems, previewDetections).filter((r) =>
+    if (!campaignItems) return [] as CampaignRow[]
+    return joinCampaign(campaignItems, campaignDetections).filter((r) =>
       (r.creatorHandle ?? '').toLowerCase() === h
       || (r.platformHandle ?? '').toLowerCase() === h
       || (r.scrapedFor ?? '').toLowerCase() === h)
-  }, [previewItems, previewDetections, h])
+  }, [campaignItems, campaignDetections, h])
 
   // GESCHAALD OP HET EVENEMENT, door dezelfde matchEvent als de evenementpagina.
   // Zonder dit telde deze pagina ook wat er in juli stond: @lizebooij kwam hier

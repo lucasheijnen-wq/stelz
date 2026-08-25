@@ -49,6 +49,7 @@ from handlers import (
     analyze_sentiment,
     bootstrap_brand,
     expand_audience,
+    import_event,
     projects,
     refresh_profiles,
     seed_subcultures,
@@ -438,6 +439,16 @@ def api_step_audience(req: https_fn.Request) -> https_fn.Response:
         brand_id,
         max_hits=int(body.get("maxHits") or expand_audience.DEFAULT_MAX_HITS),
     ), step="audience")
+
+
+@https_fn.on_request(cors=CORS_POST, memory=options.MemoryOption.GB_1, timeout_sec=300)
+def api_import_event(req: https_fn.Request) -> https_fn.Response:
+    """Import locally harvested event rows/media — see handlers/import_event.
+
+    Member-gated like every write. No `step`: an import is not a scan session
+    and must not repaint the scan panel.
+    """
+    return _run_step(req, lambda brand_id, body: import_event.run(brand_id, body))
 
 
 @https_fn.on_request(cors=CORS_POST, memory=options.MemoryOption.MB_512, timeout_sec=540)
