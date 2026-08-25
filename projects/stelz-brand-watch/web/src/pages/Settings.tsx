@@ -789,10 +789,16 @@ function TeamSection() {
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
+  // "Could not load" and "empty" are opposite findings and must not share a
+  // render path: the server refuses this list to non-members (403), and
+  // mapping that onto an empty array showed a read-only tester the raw error
+  // text PLUS "Nobody has moderator access yet" — a false statement about a
+  // brand that has owners.
+  const [loadFailed, setLoadFailed] = useState(false)
   useEffect(() => {
     fbListMembers()
       .then(setMembers)
-      .catch((e) => { setMembers([]); setErr((e as Error).message) })
+      .catch(() => setLoadFailed(true))
   }, [])
 
   async function add() {
@@ -870,7 +876,12 @@ function TeamSection() {
 
         <ErrorInline msg={err} />
 
-        {members === null ? (
+        {loadFailed ? (
+          <div className="text-[12px] text-[var(--color-ink-muted)] leading-relaxed">
+            De ledenlijst kon niet worden opgehaald — de server toont hem alleen
+            aan leden. Vraag een teamlid met toegang wie je toegang kan geven.
+          </div>
+        ) : members === null ? (
           <div className="text-[12px] text-[var(--color-ink-muted)]">Loading…</div>
         ) : members.length === 0 ? (
           <div className="border border-dashed border-[var(--color-border-strong)] py-8 text-center text-[12px] text-[var(--color-ink-muted)]">

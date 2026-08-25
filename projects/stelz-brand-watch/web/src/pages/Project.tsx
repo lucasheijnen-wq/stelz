@@ -27,9 +27,9 @@ import {
 } from '../lib/firestore'
 import { rollupProject, splitCreatorId } from '../lib/projects'
 import { useMembership } from '../lib/membershipContext'
-import { useStoryPostsPreview } from '../lib/devPreview'
+import { useStoryPostsPreview, useStoryPreview } from '../lib/devPreview'
 import { StoriesView } from './Stories'
-import { joinStories } from '../lib/storyStats'
+import { joinStories, storySource } from '../lib/storyStats'
 
 /** One row of cards at the widest grid step; the rest lives in the feed. */
 const SHOWN_POSTS = 10
@@ -45,6 +45,11 @@ export default function ProjectPage() {
 
   const [project, setProject] = useState<Project | null>(null)
   const [rows, setRows] = useState<DetectionRow[]>([])
+  // The undeduped fetch, kept beside the deduped view: the drawer's frame
+  // strip needs every sibling document of a post, and feeding it the deduped
+  // rows meant the strip could never show more than one frame here while the
+  // same drawer on Home showed them all.
+  const [rawRows, setRawRows] = useState<DetectionRow[]>([])
   // Stories come from POSTS joined with story DETECTIONS — see lib/storyStats.
   // Null posts = that query is unavailable (index not live yet).
   const [storyPosts, setStoryPosts] = useState<StoryPost[] | null>(null)
@@ -94,7 +99,9 @@ export default function ProjectPage() {
         )
         if (cancelled) return
         // Moderator-rejected rows are excluded, matching every other surface.
-        setRows(dedupeByPost(batches.flat()).filter((r) => r.is_false_positive !== true))
+        const flat = batches.flat().filter((r) => r.is_false_positive !== true)
+        setRawRows(flat)
+        setRows(dedupeByPost(flat))
         // Stories separately: the per-creator fetch above is detected-only, so
         // it cannot say how many stories were captured — only how many had a
         // can in them. For a paid roster those are different numbers and the
@@ -106,9 +113,15 @@ export default function ProjectPage() {
         ])
         if (cancelled) return
         setStoryPosts(sp && sp.filter((x) => members.has(x.creatorHandle)))
-        setStoryDetections(dedupeByPost(sd))
+        // RAW, not deduped — the number of documents per story is how
+        // joinStories knows a video verdict rests on thirteen frames
+        // (storyStats.ts says exactly this above its signature). Deduping here
+        // under-reported framesJudged on every video story; Home and Stories
+        // already pass raw.
+        setStoryDetections(sd)
       } else {
         setRows([])
+        setRawRows([])
         setStoryPosts([])
         setStoryDetections([])
       }
@@ -143,10 +156,15 @@ export default function ProjectPage() {
   const [storiesError, setStoriesError] = useState<string | null>(null)
   useEffect(() => fbSubscribeStoriesState(setStoriesState), [])
   const storyPreview = useStoryPostsPreview()
-  const storyRows = useMemo(
-    () => joinStories(storyPreview ?? storyPosts ?? [], storyPreview ? [] : storyDetections),
-    [storyPreview, storyPosts, storyDetections],
-  )
+  const storyPreviewDetections = useStoryPreview()
+  // Same join as Home and /stories, via storySource — passing [] for the
+  // preview's detections threw away every locally produced verdict and made
+  // analysed stories read as "nog niet geanalyseerd". That bug was fixed on
+  // Home; this was the copy that kept it.
+  const storyRows = useMemo(() => {
+    const src = storySource(storyPreview, storyPreviewDetections, storyPosts ?? [], storyDetections)
+    return joinStories(src.posts, src.detections)
+  }, [storyPreview, storyPreviewDetections, storyPosts, storyDetections])
   const fetchStories = useCallback(async () => {
     setStoriesFetching(true)
     setStoriesError(null)
@@ -444,9 +462,10 @@ export default function ProjectPage() {
       <DetectionDrawer
         detection={active}
         similar={active ? posts.filter((d) => d.detection_id !== active.detection_id).slice(0, 8) : []}
-        // Every detected frame of the same post, so the drawer's frame strip works
-        // here exactly as it does on the creator page.
-        frames={active ? rows
+        // Every detected frame of the same post — from the RAW rows: `rows` is
+        // already deduped to one document per post, which capped this strip at
+        // a single frame while Home showed the full set.
+        frames={active ? rawRows
           .filter((d) => d.detected === true && parentPostKey(d) === parentPostKey(active))
           .sort((a, b) => (a.frame_idx ?? 0) - (b.frame_idx ?? 0)) : []}
         onClose={() => setActive(null)}

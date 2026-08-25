@@ -27,6 +27,19 @@ export function InboxBell() {
 
   const unread = items.filter((i) => !i.read).length
 
+  // Mark-read failures used to be unawaited unhandled rejections: the badge
+  // count silently reverted on the next snapshot and nothing said why. The
+  // writes stay optimistic (the subscription corrects the list either way);
+  // the failure just gets a face now.
+  const [markError, setMarkError] = useState<string | null>(null)
+  const markAll = () => {
+    setMarkError(null)
+    fbMarkAllInboxRead(items).catch((e) => setMarkError((e as Error).message))
+  }
+  const markOne = (id: string) => {
+    fbMarkInboxRead(id).catch((e) => setMarkError((e as Error).message))
+  }
+
   return (
     <div ref={ref} className="relative">
       <button
@@ -47,11 +60,17 @@ export function InboxBell() {
           <div className="sticky top-0 px-4 h-10 flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)]">
             <div className="text-[11px] uppercase tracking-widest text-[var(--color-ink-subtle)]">Inbox</div>
             {unread > 0 && (
-              <button onClick={() => fbMarkAllInboxRead(items)} className="text-[11px] text-[var(--color-ink-muted)] hover:text-[var(--color-ink)]">
+              <button onClick={markAll} className="text-[11px] text-[var(--color-ink-muted)] hover:text-[var(--color-ink)]">
                 Mark all read
               </button>
             )}
           </div>
+
+          {markError && (
+            <div className="px-4 py-2 text-[11px] text-[var(--color-bad)] border-b border-[var(--color-border)]">
+              Niet opgeslagen: {markError}
+            </div>
+          )}
 
           {items.length === 0 ? (
             <div className="px-4 py-8 text-center text-[12px] text-[var(--color-ink-subtle)]">
@@ -63,7 +82,7 @@ export function InboxBell() {
                 <li
                   key={it.id}
                   onClick={() => {
-                    fbMarkInboxRead(it.id)
+                    markOne(it.id)
                     if (it.link) window.location.href = it.link
                     setOpen(false)
                   }}

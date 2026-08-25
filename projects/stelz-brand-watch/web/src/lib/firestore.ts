@@ -889,6 +889,9 @@ export function fbSubscribeInbox(
     orderBy('createdAt', 'desc'),
     fsLimit(50),
   )
+  // The error callback matters more than it looks: without one, a rules
+  // change or missing index leaves the bell permanently at zero — which is
+  // indistinguishable from "no news" and therefore never gets reported.
   return onSnapshot(q, (snap) => {
     onChange(
       snap.docs.map((d) => {
@@ -905,6 +908,9 @@ export function fbSubscribeInbox(
         }
       }),
     )
+  }, (err) => {
+    console.error('inbox subscription failed', err)
+    onChange([])
   })
 }
 
@@ -979,6 +985,12 @@ export function fbSubscribeScanState(
       skippedCount: (s.skippedCount as number) ?? 0,
       endReason: (s.endReason as string) ?? null,
     })
+  }, (err) => {
+    // Without this callback a rules change or dropped index makes the scan
+    // panel silently blank forever — the exact shape of failure the panel
+    // exists to make visible.
+    console.error('scan-state subscription failed', err)
+    onChange(null)
   })
 }
 
@@ -1012,6 +1024,9 @@ export function fbSubscribeStoriesState(
       lastChecked: typeof s.lastChecked === 'number' ? s.lastChecked : null,
       lastSkipped: typeof s.lastSkipped === 'string' ? s.lastSkipped : null,
     })
+  }, (err) => {
+    console.error('stories-state subscription failed', err)
+    onChange(null)
   })
 }
 
