@@ -56,7 +56,7 @@ STELZ_SUBCULTURES: list[dict[str, Any]] = [
         "name": "Student life",
         "description": "Dutch student culture: dorms, study breaks, week-night drinks, graduation parties.",
         "signature_hashtags": [
-            "studentenleven", "studenten", "studentlife", "studentenhuis",
+            "studentenleven", "studenten", "studentlife", "studentenhuis", "introweek",
             "huisfeest", "borrel", "studentenstad", "leiden", "groningen",
             "utrechtstudent", "amsterdamstudent", "rotterdamstudent",
         ],
@@ -71,7 +71,7 @@ STELZ_SUBCULTURES: list[dict[str, Any]] = [
         "description": "The Dutch Friday-afternoon-drink ritual: colleagues winding down, terraces, after-work drinks.",
         "signature_hashtags": [
             "vrijmibo", "vrijdagmiddagborrel", "vrijdagborrel", "borrel", "happyhour",
-            "vrijdag", "afterwork",
+            "vrijdag", "afterwork", "werkborrel", "kerstborrel",
         ],
         "signature_keywords": ["vrijmibo", "vrijdagmiddag", "happy hour", "afterwork"],
         "category_match": [],
@@ -85,7 +85,7 @@ STELZ_SUBCULTURES: list[dict[str, Any]] = [
         "signature_hashtags": [
             "festival", "koningsdag", "kingsday", "amsterdamdance", "lowlands",
             "awakenings", "extrema", "pinkpop", "dgtl", "ade", "pride",
-            "festivalseizoen",
+            "festivalseizoen", "zomerfeest", "mysteryland", "defqon1",
         ],
         "signature_keywords": ["festival", "koningsdag", "outdoor"],
         "category_match": ["festival"],
@@ -98,7 +98,8 @@ STELZ_SUBCULTURES: list[dict[str, Any]] = [
         "description": "Pre-going-out at someone's place, group gatherings, intimate party content.",
         "signature_hashtags": [
             "huisfeest", "preparty", "voorfeest", "feestje", "feest",
-            "girlsnight", "boysnight",
+            "girlsnight", "boysnight", "thuisfeest", "huisfeestje",
+            "vriendengroep", "vriendinnenuitje", "ladiesnight", "meidenavond",
         ],
         "signature_keywords": ["huisfeest", "feestje", "preparty", "house party"],
         "category_match": [],
@@ -110,7 +111,7 @@ STELZ_SUBCULTURES: list[dict[str, Any]] = [
         "name": "Horeca & nightlife",
         "description": "Cafes, bars, clubs and restaurants stocking and serving the brand.",
         "signature_hashtags": [
-            "cafe", "bar", "nachtleven", "uitgaan", "club", "horeca",
+            "cafe", "bar", "nachtleven", "uitgaan", "uitgaansleven", "club", "horeca",
             "amsterdamnightlife", "rotterdamcafe", "denhaagbar",
         ],
         "signature_keywords": ["cafe", "bar", "restaurant", "horeca", "nightlife", "uitgaan"],

@@ -17,14 +17,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Card, PageShell } from '../components/ui'
 import { EVENTS, type StelzEvent } from '../data/events'
-import { eventStatus, formatWindow, matchEvent } from '../lib/events'
-import { joinCampaign, type CampaignItem, type CampaignRow } from '../lib/campaign'
+import { eventStatus, evidencedHandlesFor, formatWindow, matchEvent } from '../lib/events'
+import { joinCampaign, type CampaignItem } from '../lib/campaign'
 import { isStelzStory } from '../lib/storyStats'
 import { fetchProjects, type Project } from '../lib/data'
 import { TOTAL_TRACKED_CAP, trackedCreators } from '../lib/projects'
-import { useMembership } from '../lib/membership'
-import { useCampaignPreview, useCampaignDetectionsPreview } from '../lib/devPreview'
-import type { DetectionRow } from '../lib/types'
+import { useMembership } from '../lib/membershipContext'
+import { useEventCampaign } from '../lib/eventData'
 import { fmtNum } from '../lib/format'
 
 const STATUS_TONE: Record<string, string> = {
@@ -38,18 +37,9 @@ export default function EventsPage() {
   const [projects, setProjects] = useState<Project[] | null>(null)
   const [adding, setAdding] = useState(false)
 
-  const previewItems = useCampaignPreview()
-  const previewDetections = useCampaignDetectionsPreview()
-
   useEffect(() => {
     fetchProjects().then(setProjects).catch(() => setProjects([]))
   }, [])
-
-  const rows = useMemo(
-    () => joinCampaign(previewItems ?? ([] as CampaignItem[]),
-                       previewDetections ?? ([] as DetectionRow[])),
-    [previewItems, previewDetections],
-  )
 
   return (
     <PageShell
@@ -71,7 +61,6 @@ export default function EventsPage() {
           <EventRow
             key={ev.id}
             ev={ev}
-            rows={rows}
             project={projects?.find((p) => p.id === ev.projectId) ?? null}
           />
         ))}
@@ -86,17 +75,29 @@ export default function EventsPage() {
   )
 }
 
-function EventRow({ ev, rows, project }: {
-  ev: StelzEvent; rows: CampaignRow[]; project: Project | null
+function EventRow({ ev, project }: {
+  ev: StelzEvent; project: Project | null
 }) {
   const status = eventStatus(ev)
+  // Each row fetches its own event's campaign (preview in dev, the imported
+  // Firestore rows in production — see lib/eventData). Before this the list
+  // could only see the preview fixture, so production showed 0 / 0 / 0 over a
+  // fully harvested festival.
+  const { items, detections } = useEventCampaign(ev.id)
+  const rows = useMemo(
+    () => joinCampaign(items ?? ([] as CampaignItem[]), detections),
+    [items, detections],
+  )
   // Counted through matchEvent, the same function the event page uses. Two
   // implementations of "does this belong to Lowlands" is how a list and a
   // detail page come to disagree about the same festival.
   const stats = useMemo(() => {
     let roster = 0, discovery = 0, hits = 0
+    // Same account-evidence set as the detail page, or the two disagree the
+    // moment a festival-goer's untagged clip counts there and not here.
+    const evidenced = evidencedHandlesFor(ev, rows)
     for (const r of rows) {
-      const m = matchEvent(ev, r)
+      const m = matchEvent(ev, r, evidenced)
       if (!m) continue
       if (m.source === 'roster') roster += 1
       else discovery += 1

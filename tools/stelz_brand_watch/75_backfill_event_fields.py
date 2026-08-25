@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add `event` and `scraped_for` to archive rows harvested before they existed.
+"""Add fields to archive rows harvested before those fields existed.
 
     ./firebase/functions/venv/bin/python \\
         tools/stelz_brand_watch/75_backfill_event_fields.py --event lowlands-2026
@@ -16,9 +16,17 @@ deliveries with a co-author. Counted as organic pickup they would credit the
 campaign with reach it paid for, which is the flattering direction and
 therefore the one worth a script.
 
+WHY STORY STATS MATTER. 62 wrote eight fields per story and left everything
+else in the raw payload, so the campaign page's story column was permanently
+blank while the stories page — reading the same payloads — showed 86,718 poll
+votes. A story publishes no view count at all (Instagram shows that to the
+account holder and nobody else); poll votes are the only hard figure it
+produces, and they are a floor on viewers rather than a reach number.
+
 The raw payloads were kept verbatim for exactly this reason: a field the
 harvester did not extract at the time can still be recovered from them, and the
-archive does not have to be re-scraped to gain a column.
+archive does not have to be re-scraped to gain a column. Stories cannot be
+re-scraped at all — they are gone after 24 hours.
 
 Idempotent. A row that already has both fields is left alone, and the pass can
 be re-run after any harvest.
@@ -29,9 +37,14 @@ import argparse
 import importlib.util
 import json
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "firebase" / "functions"))
+# The same normaliser 62 and 61 use, so the three cannot form three opinions
+# about what a story's poll count is.
+from handlers.scan_stories import _normalize_item  # noqa: E402
 _espec = importlib.util.spec_from_file_location(
     "_events", Path(__file__).with_name("_events.py"))
 E = importlib.util.module_from_spec(_espec)
@@ -46,6 +59,35 @@ def profile_from(url: str | None) -> str | None:
     # /p/, /reel/ and /stories/ are post URLs, not profile URLs. Reading one as
     # a handle would invent a creator called "p".
     return None if handle in ("p", "reel", "reels", "stories", "explore") else handle
+
+
+def story_stats(raw: Path) -> dict | None:
+    """A story's own numbers, recovered from the payload 62 kept.
+
+    Returns None when the payload is missing or unreadable — better an
+    unchanged row than one carrying zeros that were never measured.
+    """
+    if not raw.exists():
+        return None
+    try:
+        norm = _normalize_item(json.loads(raw.read_text()))
+    except Exception:
+        return None
+    if not norm:
+        return None
+    return {
+        "poll_votes": norm.get("poll_votes") or 0,
+        "poll_count": norm.get("poll_count") or 0,
+        "poll_questions": norm.get("poll_questions") or [],
+        "hashtags": norm.get("hashtags") or [],
+        "mentions": norm.get("mentions") or [],
+        "music": norm.get("music"),
+        "is_paid_partnership": bool(norm.get("is_paid_partnership")),
+        "full_name": norm.get("full_name"),
+        "verified": norm.get("is_verified"),
+        "duration": norm.get("video_duration"),
+        "link_urls": norm.get("link_urls") or [],
+    }
 
 
 def main() -> int:
@@ -73,8 +115,20 @@ def main() -> int:
                 row["event"] = ev["id"]
                 dirty = True
 
-            # Only Instagram feed posts carry a co-author. A story is always the
-            # profile's own; a TikTok has no such concept.
+            if kind == "stories":
+                if "poll_votes" not in row:
+                    stats = story_stats(P.raw / (row.get("raw_file") or ""))
+                    if stats:
+                        row.update(stats)
+                        dirty = True
+                        resolved += 1
+                    else:
+                        unresolved += 1
+                changed += dirty
+                continue
+
+            # Only Instagram feed posts carry a co-author. A TikTok has no such
+            # concept, and a story is always the profile's own.
             if kind != "ig-posts" or row.get("scraped_for"):
                 changed += dirty
                 continue
@@ -100,6 +154,10 @@ def main() -> int:
                 collab += 1
 
         note = f"{changed} rijen bijgewerkt"
+        if kind == "stories":
+            note += f" · {resolved} met cijfers uit de ruwe payload"
+            if unresolved:
+                note += f" · {unresolved} zonder bruikbare payload"
         if kind == "ig-posts":
             note += (f" · {resolved} met scraped_for, waarvan {collab} collab "
                      f"(niet-roster account, roster-profiel)")

@@ -14,7 +14,8 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { PageShell, Card, Badge, Button, Avatar, Tabs, CARD_GRID } from '../components/ui'
 import { MediaTile } from '../components/MediaTile'
 import { DetectionDrawer } from '../components/DetectionDrawer'
-import { StackedDayBars, bucketByDay, type Series } from '../components/Chart'
+import { StackedDayBars, type Series } from '../components/Chart'
+import { bucketByDay } from '../lib/buckets'
 import { PasteImport } from '../components/PasteImport'
 import { StoriesStrip } from '../components/StoriesStrip'
 import { fmtNum } from '../lib/format'
@@ -25,10 +26,10 @@ import {
   type CreatorProfile, type StoriesState, type StoryPost,
 } from '../lib/firestore'
 import { rollupProject, splitCreatorId } from '../lib/projects'
-import { useMembership } from '../lib/membership'
-import { useStoryPostsPreview } from '../lib/devPreview'
+import { useMembership } from '../lib/membershipContext'
+import { useStoryPostsPreview, useStoryPreview } from '../lib/devPreview'
 import { StoriesView } from './Stories'
-import { joinStories } from '../lib/storyStats'
+import { joinStories, storySource } from '../lib/storyStats'
 
 /** One row of cards at the widest grid step; the rest lives in the feed. */
 const SHOWN_POSTS = 10
@@ -44,6 +45,11 @@ export default function ProjectPage() {
 
   const [project, setProject] = useState<Project | null>(null)
   const [rows, setRows] = useState<DetectionRow[]>([])
+  // The undeduped fetch, kept beside the deduped view: the drawer's frame
+  // strip needs every sibling document of a post, and feeding it the deduped
+  // rows meant the strip could never show more than one frame here while the
+  // same drawer on Home showed them all.
+  const [rawRows, setRawRows] = useState<DetectionRow[]>([])
   // Stories come from POSTS joined with story DETECTIONS — see lib/storyStats.
   // Null posts = that query is unavailable (index not live yet).
   const [storyPosts, setStoryPosts] = useState<StoryPost[] | null>(null)
@@ -55,9 +61,23 @@ export default function ProjectPage() {
   const [scanMsg, setScanMsg] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
+  // THE FETCH LIVES IN THE EFFECT, and callers re-trigger it by bumping
+  // `reloadKey`. It used to be a useCallback the effect invoked, which is the
+  // shape react-hooks/set-state-in-effect exists to catch: the effect body
+  // reached a setState synchronously.
+  //
+  // The rewrite pays for itself twice. It brings CANCELLATION, which the
+  // callback version had none of — open a project, click straight through to
+  // another, and the first project's rows still arrived and overwrote the
+  // second's, because nothing told the in-flight request it was obsolete. And
+  // `loading` is now raised by whoever asks for a reload, from a click or a
+  // timer, instead of by the fetch itself.
+  const [reloadKey, setReloadKey] = useState(0)
+  const reload = () => { setLoading(true); setError(null); setReloadKey((k) => k + 1) }
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
     try {
       // Profiles ride along for display names + fresh follower counts —
       // imported roster members have a fullName long before their first hit.
@@ -65,6 +85,7 @@ export default function ProjectPage() {
         fetchProjects(),
         fetchCreatorProfiles().catch(() => ({} as Record<string, CreatorProfile>)),
       ])
+      if (cancelled) return
       setProfiles(profs)
       const p = all.find((x) => x.id === projectId) ?? null
       setProject(p)
@@ -76,8 +97,11 @@ export default function ProjectPage() {
             fetchDetections({ creatorHandle: splitCreatorId(cid).handle, limit: 300 }).catch(() => []),
           ),
         )
+        if (cancelled) return
         // Moderator-rejected rows are excluded, matching every other surface.
-        setRows(dedupeByPost(batches.flat()).filter((r) => r.is_false_positive !== true))
+        const flat = batches.flat().filter((r) => r.is_false_positive !== true)
+        setRawRows(flat)
+        setRows(dedupeByPost(flat))
         // Stories separately: the per-creator fetch above is detected-only, so
         // it cannot say how many stories were captured — only how many had a
         // can in them. For a paid roster those are different numbers and the
@@ -87,21 +111,28 @@ export default function ProjectPage() {
           fbFetchStoryPosts(2000).catch(() => null),
           fbFetchStories(2000).catch(() => [] as DetectionRow[]),
         ])
+        if (cancelled) return
         setStoryPosts(sp && sp.filter((x) => members.has(x.creatorHandle)))
-        setStoryDetections(dedupeByPost(sd))
+        // RAW, not deduped — the number of documents per story is how
+        // joinStories knows a video verdict rests on thirteen frames
+        // (storyStats.ts says exactly this above its signature). Deduping here
+        // under-reported framesJudged on every video story; Home and Stories
+        // already pass raw.
+        setStoryDetections(sd)
       } else {
         setRows([])
+        setRawRows([])
         setStoryPosts([])
         setStoryDetections([])
       }
     } catch (e) {
-      setError((e as Error).message)
+      if (!cancelled) setError((e as Error).message)
     } finally {
-      setLoading(false)
+      if (!cancelled) setLoading(false)
     }
-  }, [projectId])
-
-  useEffect(() => { void load() }, [load])
+    })()
+    return () => { cancelled = true }
+  }, [projectId, reloadKey])
 
   const rollup = useMemo(
     () => (project ? rollupProject(project, rows) : null),
@@ -125,24 +156,29 @@ export default function ProjectPage() {
   const [storiesError, setStoriesError] = useState<string | null>(null)
   useEffect(() => fbSubscribeStoriesState(setStoriesState), [])
   const storyPreview = useStoryPostsPreview()
-  const storyRows = useMemo(
-    () => joinStories(storyPreview ?? storyPosts ?? [], storyPreview ? [] : storyDetections),
-    [storyPreview, storyPosts, storyDetections],
-  )
+  const storyPreviewDetections = useStoryPreview()
+  // Same join as Home and /stories, via storySource — passing [] for the
+  // preview's detections threw away every locally produced verdict and made
+  // analysed stories read as "nog niet geanalyseerd". That bug was fixed on
+  // Home; this was the copy that kept it.
+  const storyRows = useMemo(() => {
+    const src = storySource(storyPreview, storyPreviewDetections, storyPosts ?? [], storyDetections)
+    return joinStories(src.posts, src.detections)
+  }, [storyPreview, storyPreviewDetections, storyPosts, storyDetections])
   const fetchStories = useCallback(async () => {
     setStoriesFetching(true)
     setStoriesError(null)
     try {
       await fbStepStories()
-      await load()
+      reload()
       // Detections trail the sweep by a fan-out; look again shortly.
-      window.setTimeout(() => { void load() }, 20_000)
+      window.setTimeout(reload, 20_000)
     } catch (e) {
       setStoriesError((e as Error).message)
     } finally {
       setStoriesFetching(false)
     }
-  }, [load])
+  }, [])
 
   const act = async (
     action: 'addCreators' | 'removeCreators' | 'archive' | 'unarchive',
@@ -157,7 +193,7 @@ export default function ProjectPage() {
       if (action === 'addCreators') {
         // New members need their profiles/rows fetched to render properly.
         setShowImport(false)
-        void load()
+        reload()
       }
     } catch (e) {
       setError((e as Error).message)
@@ -426,9 +462,10 @@ export default function ProjectPage() {
       <DetectionDrawer
         detection={active}
         similar={active ? posts.filter((d) => d.detection_id !== active.detection_id).slice(0, 8) : []}
-        // Every detected frame of the same post, so the drawer's frame strip works
-        // here exactly as it does on the creator page.
-        frames={active ? rows
+        // Every detected frame of the same post — from the RAW rows: `rows` is
+        // already deduped to one document per post, which capped this strip at
+        // a single frame while Home showed the full set.
+        frames={active ? rawRows
           .filter((d) => d.detected === true && parentPostKey(d) === parentPostKey(active))
           .sort((a, b) => (a.frame_idx ?? 0) - (b.frame_idx ?? 0)) : []}
         onClose={() => setActive(null)}

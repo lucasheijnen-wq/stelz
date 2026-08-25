@@ -33,6 +33,9 @@ export const STEP_ORDER: { key: StepId; label: string }[] = [
   { key: ANALYSIS_KEY, label: 'Beelden analyseren' },
   { key: 'profiles', label: 'Profielen verversen' },
   { key: 'subcultures', label: 'Scenes indelen' },
+  // Before SRS in display as in execution: the edges this writes are the
+  // graph layer SRS reads.
+  { key: 'audience', label: 'Publiek uitbreiden' },
   { key: 'srs', label: 'Resonantie berekenen' },
   { key: 'sentiment', label: 'Sentiment scoren' },
 ]
@@ -40,8 +43,35 @@ export const STEP_ORDER: { key: StepId; label: string }[] = [
 /** No worker has written for this long → treat the session as dead. */
 export const STALL_MS = 5 * 60_000
 
+/**
+ * The outer limit of any believable detect fan-out.
+ *
+ * The heartbeat freezes during the detect phase (workers bump the counters,
+ * not lastActivityAt), so staleness alone cannot tell a draining fan-out from
+ * a dead one — which is why `analysing` overrides the stall check. Without a
+ * time limit that override is forever: a fan-out that died at 40/100 kept the
+ * home page on "Beelden analyseren" for WEEKS, which reads as a scrape that is
+ * both running and broken. No real fan-out lives anywhere near this long, so
+ * past it, frozen counters mean dead workers, not slow ones.
+ */
+export const ANALYSIS_ABANDON_MS = 6 * 3600_000
+
 /** Too few completions to extrapolate from; an ETA here swings wildly. */
 const ETA_MIN_SAMPLES = 20
+
+/** The most recent thing the backend ever wrote about this scan. */
+function lastSignalMs(s: ScanState): number {
+  return Math.max(
+    s.startedAt ? new Date(s.startedAt).getTime() : 0,
+    s.finishedAt ? new Date(s.finishedAt).getTime() : 0,
+    s.lastActivityAt ? new Date(s.lastActivityAt).getTime() : 0,
+  )
+}
+
+/** Incomplete counters past any believable fan-out lifetime. */
+function analysisAbandoned(s: ScanState, now: number): boolean {
+  return now - lastSignalMs(s) > ANALYSIS_ABANDON_MS
+}
 
 export function analysisProgress(s: ScanState | null, now = Date.now()):
   { done: number; total: number; pct: number; etaMs: number | null } | null {
@@ -58,26 +88,55 @@ export function analysisProgress(s: ScanState | null, now = Date.now()):
   return { done, total, pct, etaMs }
 }
 
-function isStale(s: ScanState, now: number): boolean {
-  if (!s.startedAt || s.finishedAt) return false
-  const last = s.lastActivityAt ? new Date(s.lastActivityAt).getTime() : 0
-  return last > 0 && now - last > STALL_MS
+/**
+ * An UNFINISHED scan nothing has written to for five minutes.
+ *
+ * Falls back to startedAt when lastActivityAt never landed: a session that
+ * crashed before its first heartbeat used to fail the `last > 0` guard here
+ * and read as 'scraping' forever — a pulsing dot over a scan that died at
+ * birth. Exported because RunScanButton needs the same judgement and had
+ * grown its own copy, which disagreed with this one in exactly that case.
+ */
+export function scanIsStale(s: ScanState | null, now = Date.now()): boolean {
+  if (!s?.startedAt || s.finishedAt) return false
+  const last = s.lastActivityAt
+    ? new Date(s.lastActivityAt).getTime()
+    : new Date(s.startedAt).getTime()
+  return now - last > STALL_MS
 }
 
 export function scanPhase(s: ScanState | null, now = Date.now()): ScanPhase {
   if (!s || !s.startedAt) return 'idle'
   const steps = s.steps ?? {}
-  const anyRunning = Object.values(steps).some((st) => st?.state === 'running')
+  // A step map entry can say "running" forever: for four commits the backend's
+  // hashtags step crashed on close (missing import) AFTER finishedAt was
+  // stamped, so scanIsStale never fired and this function read 'scraping' for
+  // weeks. "Running" is only believed while the backend has signalled at all
+  // recently — same horizon as the analysis pseudo-step, because a healthy
+  // creators step legally writes nothing for its full 540s timeout and the
+  // 5-minute STALL_MS would call it dead mid-flight.
+  const abandoned = s ? analysisAbandoned(s, now) : false
+  const hasRunning = Object.values(steps).some((st) => st?.state === 'running')
+  const anyRunning = hasRunning && !abandoned
   const anyError = Object.values(steps).some((st) => st?.state === 'error')
   const analysis = analysisProgress(s, now)
+  // Incomplete counters read as "analysing" only while the fan-out could
+  // still believably be alive — see ANALYSIS_ABANDON_MS.
   const analysing = analysis != null && analysis.done < analysis.total
+    && !abandoned
 
-  if (isStale(s, now) && !analysing) return 'stalled'
+  if (scanIsStale(s, now) && !analysing) return 'stalled'
   if (anyRunning) return 'scraping'
   if (analysing) return 'analysing'
   // An error only becomes the headline once nothing is still running — a failed
   // enrichment step must not hide the fact that detection is still working.
-  if (anyError) return 'error'
+  // Work that died mid-way counts as an error too — a fan-out frozen short of
+  // its total, or a step still marked running hours after the last signal —
+  // because a green "Scan afgerond" above a dead row would contradict it.
+  const analysisDied = analysis != null && analysis.done < analysis.total
+    && abandoned
+  const runningDied = hasRunning && abandoned
+  if (anyError || analysisDied || runningDied) return 'error'
   // Without a steps map, fall back to the flat pair the old pill used.
   if (!s.finishedAt) return 'scraping'
   return 'done'
@@ -97,12 +156,23 @@ export function stepViews(
       if (!analysis) {
         return { key, label, state: (scanFinished ? 'skipped' : 'pending') as StepState, detail: null, error: null }
       }
-      const running = analysis.done < analysis.total
+      const incomplete = analysis.done < analysis.total
+      // Frozen mid-way past any believable fan-out lifetime: the workers died.
+      // Saying so beats a progress bar that promises the rest is still coming.
+      if (incomplete && s && analysisAbandoned(s, now)) {
+        return {
+          key,
+          label,
+          state: 'error' as StepState,
+          detail: `${analysis.done} van ${analysis.total}`,
+          error: 'niet afgemaakt — de analyse-workers schrijven al uren niets meer',
+        }
+      }
       return {
         key,
         label,
-        state: (running ? 'running' : 'done') as StepState,
-        detail: running
+        state: (incomplete ? 'running' : 'done') as StepState,
+        detail: incomplete
           ? `${analysis.done} van ${analysis.total}${analysis.etaMs != null ? ` · nog ~${Math.max(1, Math.round(analysis.etaMs / 60_000))} min` : ''}`
           : `${analysis.total} beelden · ${s?.detectionsHit ?? 0} hits`,
         error: null,
@@ -121,6 +191,18 @@ export function stepViews(
         state: (scanFinished ? 'skipped' : 'pending') as StepState,
         detail: null,
         error: clientError,
+      }
+    }
+    // "Running" hours after the backend last wrote anything is a step whose
+    // close was lost (crash, timeout kill, the four-commit missing-import bug).
+    // Saying so beats a pulsing dot that promises the step is still going.
+    if (step.state === 'running' && s && analysisAbandoned(s, now)) {
+      return {
+        key,
+        label,
+        state: 'error' as StepState,
+        detail: null,
+        error: clientError ?? 'niet afgemaakt — deze stap schrijft al uren niets meer',
       }
     }
     const state: StepState = clientError && step.state !== 'running' ? 'error' : step.state

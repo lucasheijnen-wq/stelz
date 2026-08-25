@@ -25,7 +25,7 @@ export function CreatorTable({ rollup, onPick, selected }: {
   }
   return (
     <Card className="overflow-x-auto">
-      <table className="w-full text-[12px] min-w-[760px]">
+      <table className="w-full text-[12px] min-w-[900px]">
         <thead>
           <tr className="text-[10px] uppercase tracking-widest text-[var(--color-ink-subtle)] border-b border-[var(--color-border)]">
             <th className="text-left font-normal px-4 py-2.5">Creator</th>
@@ -34,7 +34,22 @@ export function CreatorTable({ rollup, onPick, selected }: {
             <th className="text-right font-normal px-3 py-2.5">TikToks</th>
             <th className="text-right font-normal px-3 py-2.5">Met Stëlz</th>
             <th className="text-right font-normal px-3 py-2.5">Mogelijk</th>
-            <th className="text-right font-normal px-3 py-2.5">TikTok-views</th>
+            {/* Three columns, never a fourth that adds them. A TikTok play, an
+                Instagram like and a poll vote are three different events; a
+                "totaal bereik" spanning them would describe none of them. The
+                headers name the surface for that reason. */}
+            <th className="text-right font-normal px-3 py-2.5" title="Afspeeltellingen op TikTok">
+              TikTok-views
+            </th>
+            <th className="text-right font-normal px-3 py-2.5" title="Likes op Instagram-posts">
+              IG-likes
+            </th>
+            <th
+              className="text-right font-normal px-3 py-2.5"
+              title="Poll-stemmen op stories — Instagram geeft kijkcijfers alleen aan de accounthouder, dus dit is de enige harde ondergrens"
+            >
+              Pollstemmen
+            </th>
             <th className="text-right font-normal px-4 py-2.5">Laatste post</th>
           </tr>
         </thead>
@@ -73,6 +88,12 @@ export function CreatorTable({ rollup, onPick, selected }: {
                 </td>
                 <td className="px-3 py-2.5 text-right tabular-nums">
                   {c.bySurface.tiktok.metric ? compactNum(c.bySurface.tiktok.metric) : '—'}
+                </td>
+                <td className="px-3 py-2.5 text-right tabular-nums">
+                  {c.bySurface.post.metric ? compactNum(c.bySurface.post.metric) : '—'}
+                </td>
+                <td className="px-3 py-2.5 text-right tabular-nums">
+                  {c.bySurface.story.metric ? compactNum(c.bySurface.story.metric) : '—'}
                 </td>
                 <td className="px-4 py-2.5 text-right text-[var(--color-ink-subtle)]">
                   {last ? timeAgo(last) : 'niets geplaatst'}

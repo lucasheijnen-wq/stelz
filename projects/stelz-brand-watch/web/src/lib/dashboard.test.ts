@@ -11,8 +11,7 @@
 // expressions, so they pin the behaviour rather than the rendering.
 
 import { describe, it, expect } from 'vitest'
-import { formatFollowers } from '../components/ui'
-
+import { formatFollowers } from './format'
 // ── Growth, as computed for the leaderboard ──────────────────────────
 type Growth = number | 'new' | null
 function growthFor(recent: number, prior: number): Growth {

@@ -75,6 +75,70 @@ def write_verdicts(path: Path, rows: dict[str, dict]) -> None:
     tmp.replace(path)
 
 
+def content_identity(e: dict, kind: str) -> tuple | None:
+    """What makes a row in one archive the SAME clip or slide as a row in
+    another. Mirrors 72_campaign_fixture.content_key — the fixture merges what
+    this failed to match, but by then Gemini has been paid twice. Identity
+    lives in archive FIELDS; the id text differs per archive (discovery
+    prefixes Instagram ids with "ig") and is no identity at all."""
+    if kind == "stories":
+        return None  # only one archive holds stories
+    handle = (e.get("handle") or "").lower()
+    if kind == "ig-posts" or e.get("platform") == "instagram":
+        sc = e.get("short_code")
+        return ("ig", handle, sc, e.get("slot")) if sc else None
+    vid = e.get("video_id")
+    return ("tt", handle, str(vid)) if vid else None
+
+
+def reuse_sibling_verdicts(ev: dict, archive: str, id_field: str,
+                           todo: list[dict], verdicts: dict[str, dict],
+                           max_dim: int) -> int:
+    """Copy verdicts for todo items whose content a SIBLING archive already
+    judged at this resolution. The copies land in `verdicts` under this
+    archive's own item id, marked `copied_from`, so a borrowed opinion stays
+    distinguishable from an original one. Returns how many were copied."""
+    wanted: dict[tuple, list[dict]] = {}
+    for e in todo:
+        k = content_identity(e, archive)
+        if k:
+            wanted.setdefault(k, []).append(e)
+
+    copied = 0
+    for kind in ID_FIELD:
+        if kind == archive or kind == "stories" or not wanted:
+            continue
+        sp = E.paths(ev, kind)
+        if not sp.index.exists():
+            continue
+        sverd = load_verdicts(sp.dir / "verdicts.jsonl")
+        if not sverd:
+            continue
+        sid = ID_FIELD[kind]
+        for line in sp.index.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                se = json.loads(line)
+            except Exception:
+                continue
+            k = content_identity(se, kind)
+            if k not in wanted:
+                continue
+            sv = sverd.get(str(se.get(sid) or ""))
+            # Only a verdict reached at THIS run's resolution transfers: rows
+            # without max_dim predate the guard and stay where they are.
+            if not sv or sv.get("max_dim") != max_dim:
+                continue
+            for e in wanted.pop(k):
+                v = dict(sv)
+                v["item_id"] = e[id_field]
+                v["copied_from"] = kind
+                verdicts[e[id_field]] = v
+                copied += 1
+    return copied
+
+
 def analyse(entry: dict, media: Path, refs: list[bytes], covers_only: bool,
             stats: dict) -> tuple[list[dict], int]:
     results: list[dict] = []
@@ -180,6 +244,25 @@ def main() -> int:
         print(f"    Pass --max-dim {settled} to extend the archive, or --redo to "
               f"re-judge all of it at {args.max_dim} (which re-bills every row).")
         return 2
+
+    # NEVER PAY GEMINI TWICE FOR THE SAME PIXELS. The same clip enters two
+    # archives by two roads — found via #stelz into discovery, and via the
+    # profile scrape of its poster into tiktok/ig-posts — and each archive's
+    # todo-list only knows its own verdicts. Round A2 spent $0,60 re-judging
+    # six videos the discovery pass had already judged. Identity comes from the
+    # archive FIELDS (handle + video_id, or handle + shortcode + slide), never
+    # from id text: discovery prefixes IG ids with "ig". Only verdicts reached
+    # at THIS run's resolution are copied — a copy at another max_dim would
+    # smuggle in exactly the mixed-resolution archive the check above refuses.
+    # Skipped under --redo*: those flags exist to form a fresh opinion.
+    if not (args.redo or args.redo_found or args.redo_verified):
+        copied = reuse_sibling_verdicts(ev, args.archive, id_field, todo,
+                                        verdicts, args.max_dim)
+        if copied:
+            write_verdicts(vpath, verdicts)
+            todo = [e for e in todo if e[id_field] not in verdicts]
+            print(f"{copied} al beoordeeld in een ander archief — oordeel "
+                  f"gekopieerd, {len(todo)} over voor Gemini")
 
     if not todo:
         print("Nothing to do.")

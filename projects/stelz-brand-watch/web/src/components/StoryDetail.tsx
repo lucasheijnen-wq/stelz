@@ -12,7 +12,8 @@
 
 import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Badge, PRODUCT_LINE_LABEL } from './ui'
+import { Badge } from './ui'
+import { PRODUCT_LINE_LABEL } from '../lib/labels'
 import { MediaTile } from './MediaTile'
 import { VERDICT_LABEL, type StoryVerdict } from '../lib/storyStats'
 import type { DetectionRow } from '../lib/types'

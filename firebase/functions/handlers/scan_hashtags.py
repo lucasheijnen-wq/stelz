@@ -22,7 +22,14 @@ from typing import Any
 from google.cloud import pubsub_v1
 from google.cloud.firestore import SERVER_TIMESTAMP, ArrayUnion, Increment
 
-from lib import apify, fs, hashtags, usage
+# scan_state is load-bearing here: publish_tags closes the hashtags step ITSELF
+# on the budget-refused and empty-pool paths (no worker will ever exist to close
+# it), and _mark_tag_done closes it from the last Pub/Sub worker. This import
+# was missing for four commits — every close raised NameError, the step stayed
+# "running" forever, and the dashboard read "Bezig met scannen" for weeks.
+# tests/test_handler_imports.py now fails the suite if any handler references a
+# name it never imports.
+from lib import apify, fs, hashtags, scan_state, usage
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +53,24 @@ def _tiktok_music_url(music_id: str | None, music_name: str | None) -> str | Non
         return None
     slug = _slugify(music_name or "original-sound")
     return f"https://www.tiktok.com/music/{slug}-{music_id}"
+
+
+def _tagged_users(item: dict) -> list[str]:
+    """Who is tagged IN the media, normalised to bare handles.
+
+    Instagram sends `taggedUsers: [{username}]`, TikTok `detailedMentions`
+    (dicts or strings depending on actor version). Stored on the post doc
+    because expand_audience reads it back: a person tagged in a photo of the
+    can was AT the party — the warmest discovery signal the data holds, and it
+    used to be dropped at ingest.
+    """
+    out: list[str] = []
+    for u in (item.get("taggedUsers") or item.get("detailedMentions") or []):
+        name = u.get("username") or u.get("name") if isinstance(u, dict) else u
+        h = str(name or "").strip().lstrip("@").lower()
+        if h and h not in out:
+            out.append(h)
+    return out
 
 # How many DIFFERENT hashtags a handle must be seen on before it is auto-promoted
 # from discoveryQueue to a tracked creator.
@@ -118,17 +143,51 @@ def publish_tags(brand_id: str, per_tag: int = 500, max_tags: int = 50) -> dict[
     # (18,130 vs 19,200 projected results on the real pool).
     pool_dicts = [{**(d.to_dict() or {}), "_doc": d} for d in pool_raw]
     selected = hashtags.select_tags(pool_dicts, max_tags)
+
+    # ── SIZE THE SCAN TO THE BUDGET BEFORE COMMITTING IT ─────────────────
+    # Apify bills at enqueue time, and the degrade ladder above only reacts to
+    # spend that already happened: at level 0 it happily let the shipped
+    # defaults through — ~$40 projected against a $5 daily budget, the whole
+    # day gone in one click and the NEXT click refused. Trim deterministically
+    # until the projection fits inside today's remaining room: halve per_tag
+    # first (floor 30 — for discovery, breadth of tags beats depth per tag),
+    # then shrink max_tags by a quarter WITH re-selection so the family
+    # stratification survives (a plain slice would cut the lifestyle floor
+    # first, exactly what select_tags exists to prevent). If the floors still
+    # project over, proceed at the floors: refusing outright remains the
+    # ladder's job, not this guard's.
+    APIFY_SHARE = 0.5  # the other half of the day pays Gemini for what lands
+    allowed_usd = usage.remaining_budget_usd(brand_id) * APIFY_SHARE
+    unit = usage.COST_PER_UNIT["apify_ig_results"]
+    trimmed = False
+    while hashtags.projected_results(selected, per_tag) * unit > allowed_usd:
+        if per_tag > 30:
+            per_tag = max(30, per_tag // 2)
+            trimmed = True
+            continue
+        if max_tags > 5:
+            max_tags = max(5, int(max_tags * 0.75))
+            selected = hashtags.select_tags(pool_dicts, max_tags)
+            trimmed = True
+            continue
+        break
+    projected = hashtags.projected_results(selected, per_tag)
+    projected_usd = round(projected * unit, 2)
     pool = [d["_doc"] for d in selected]
     log.info(
         f"[{brand_id}] selected {len(pool)}/{len(pool_raw)} tags, "
-        f"~{hashtags.projected_results(selected, per_tag)} projected Apify results"
+        f"~{projected} projected Apify results (~${projected_usd})"
+        + (f" — TRIMMED to fit ${allowed_usd:.2f} remaining" if trimmed else "")
     )
 
-    publisher = pubsub_v1.PublisherClient()
-    topic = publisher.topic_path(PROJECT_ID, SCRAPE_TAG_TOPIC)
+    # ── BUILD FIRST, RESET SECOND, PUBLISH LAST ──────────────────────────
+    # The session reset used to run AFTER the publishes (behind only a 15s
+    # publisher flush). A tag worker that finished inside that window had its
+    # Increment(1) overwritten by the literal 0 — hashtagDone could then never
+    # reach hashtagQueued and finishedAt was never stamped. Nothing may be in
+    # flight before the zeroes land.
+    payloads: list[dict] = []
     queued: list[str] = []
-    futures = []
-
     for h_doc in pool:
         h = h_doc.to_dict() or {}
         tag = (h.get("tag") or "").lower().lstrip("#")
@@ -143,18 +202,18 @@ def publish_tags(brand_id: str, per_tag: int = 500, max_tags: int = 50) -> dict[
         # still wins.
         cap = h.get("maxResults")
         tag_per = min(per_tag, int(cap)) if isinstance(cap, (int, float)) and cap else per_tag
-        payload = {
+        payloads.append({
             "brandId": brand_id,
             "tag": tag,
             "platform": platform,
             "perTag": tag_per,
-        }
-        futures.append(publisher.publish(topic, json.dumps(payload).encode()))
+        })
         queued.append(f"{platform}:{tag}")
 
-    if futures:
-        from concurrent.futures import wait as _fwait
-        _fwait(futures, timeout=15)
+    if not payloads:
+        # Every selected tag was blank — no worker will ever close the step.
+        scan_state.step_finished(brand_id, "hashtags", {"queued": 0})
+        return {"queued": 0, "tags": []}
 
     # Write the scan session state so the UI can subscribe and show progress
     # without polling. Reset counters at every new scan click. Worker
@@ -177,7 +236,18 @@ def publish_tags(brand_id: str, per_tag: int = 500, max_tags: int = 50) -> dict[
         }
     }, merge=True)
 
-    return {"queued": len(queued), "tags": queued}
+    publisher = pubsub_v1.PublisherClient()
+    topic = publisher.topic_path(PROJECT_ID, SCRAPE_TAG_TOPIC)
+    futures = [publisher.publish(topic, json.dumps(p).encode()) for p in payloads]
+    if futures:
+        # Flush the publisher's local futures before the HTTP function returns —
+        # an unflushed publish can be dropped when the container is frozen.
+        from concurrent.futures import wait as _fwait
+        _fwait(futures, timeout=15)
+
+    return {"queued": len(queued), "tags": queued,
+            "trimmed": trimmed, "projectedResults": projected,
+            "projectedUsd": projected_usd}
 
 
 def _mark_tag_done(brand_id: str, posts_written: int = 0, detect_tasks: int = 0) -> None:
@@ -856,6 +926,7 @@ def _persist_hashtag_post(
         "caption": caption[:2000],
         "hashtags": [h.lower() for h in hashtags],
         "mentions": mentions,
+        "taggedUsers": _tagged_users(item),
         "postedAt": posted_at,
         "likesCount": likes,
         "commentsCount": comments,

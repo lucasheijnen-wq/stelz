@@ -6,6 +6,8 @@
 import type { DetectionRow } from './types'
 import { classifySignal } from './signal'
 import type { CommunityProfile } from './communities'
+import type { CampaignRow } from './campaign'
+import { HIT_COLUMNS, hitText, hitValue } from './hits'
 
 /**
  * Quote a CSV field.
@@ -27,11 +29,18 @@ function field(v: unknown): string {
   return `"${s.replace(/"/g, '""')}"`
 }
 
+// U+FEFF, as an escape rather than the character itself. Written literally
+// this line read `return '' + lines.join(...)` — a concatenation with what
+// looks like an empty string, which is an invitation to delete it and
+// silently break every export the moment someone tidies up. See
+// sourceHygiene.test.ts, which now refuses invisible characters outright.
+const BOM = '\uFEFF'
+
 function toCsv(headers: string[], rows: unknown[][]): string {
   const lines = [headers.map(field).join(','), ...rows.map((r) => r.map(field).join(','))]
   // BOM so Excel opens UTF-8 correctly — without it "Stëlz" arrives mangled,
   // which is a poor look on an export of a brand's own name.
-  return '﻿' + lines.join('\r\n')
+  return BOM + lines.join('\r\n')
 }
 
 export function detectionsCsv(rows: DetectionRow[]): string {
@@ -70,6 +79,37 @@ export function detectionsCsv(rows: DetectionRow[]): string {
       d.verified === true ? 'yes' : '',
       d.is_false_positive === true ? 'yes' : '',
       d.detection_id,
+    ]),
+  )
+}
+
+/**
+ * Every Stëlz sighting, one row each — the table on screen, as a file.
+ *
+ * Columns come from HIT_COLUMNS rather than being listed again here, so the
+ * export and the screen cannot drift apart. That drift is the normal failure:
+ * someone adds a column to the table, nobody adds it to the export, and the
+ * spreadsheet a client works from quietly describes an older campaign.
+ *
+ * BLANKS STAY BLANK. A story has no view count, and writing 0 into that cell
+ * turns "Instagram does not tell us" into "nobody watched" the moment somebody
+ * sums the column. Numeric columns therefore carry raw numbers or nothing at
+ * all — never the "—" the screen shows, which would also make the column
+ * unsummable in Excel.
+ */
+export function campaignCsv(rows: CampaignRow[]): string {
+  const headers = [...HIT_COLUMNS.map((c) => c.label), 'Zekerheid', 'Beschrijving', 'Link']
+  return toCsv(
+    headers,
+    rows.map((r) => [
+      ...HIT_COLUMNS.map((c) => {
+        const v = hitValue(r, c.key)
+        if (v == null) return ''
+        return c.numeric ? v : hitText(r, c.key)
+      }),
+      r.confidence != null ? Math.round(r.confidence * 100) : '',
+      r.detection?.context ?? '',
+      r.url ?? '',
     ]),
   )
 }

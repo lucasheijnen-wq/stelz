@@ -42,6 +42,8 @@
   "hashtags": [
     { "tag": "stelz", "family": "brand" },
     { "tag": "drinkstelz", "family": "brand" },
+    { "tag": "welovestelz", "family": "brand" },
+    { "tag": "ilovestelz", "family": "brand" },
     { "tag": "stelzhardlemonade", "family": "brand" },
     { "tag": "stelzhardseltzer", "family": "brand" },
     { "tag": "stelzhardicedtea", "family": "brand" },
@@ -52,11 +54,17 @@
     { "tag": "lowlands2026", "family": "event" },
     { "tag": "lowlandsfestival", "family": "event" },
     { "tag": "llowlands", "family": "event" },
-    { "tag": "lowlandsparadise", "family": "event" }
+    { "tag": "lowlandsparadise", "family": "event" },
+    { "tag": "ll2026", "family": "event" },
+    { "tag": "lowlandstips", "family": "event" },
+    { "tag": "biddinghuizen", "family": "event" },
+    { "tag": "lowlandsoutfit", "family": "event" },
+    { "tag": "lowlandsvlog", "family": "event" },
+    { "tag": "lowlandscamping", "family": "event" }
   ],
   "discovery": {
     "perTag": 40,
     "perBrandTag": 200,
-    "instagramEventTags": false
+    "instagramEventTags": true
   }
 }

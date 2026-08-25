@@ -85,6 +85,10 @@ export type CampaignItem = {
   likes: number | null
   comments: number | null
   shares: number | null
+  /** Saves. TikTok's strongest intent signal — a like costs nothing, a save
+   *  means "I want this back". Instagram publishes no equivalent, so it is null
+   *  there rather than 0. */
+  saves: number | null
   pollVotes: number | null
   isPaidPartnership: boolean
   /** Defaults to 'roster' when absent: every archive that predates discovery
@@ -345,12 +349,23 @@ export function campaignRollup(
   // knows its own total. The sets are kept beside the stats objects and folded
   // in once at the end, so `posts` can never drift from the rows that produced
   // it the way a hand-maintained counter would.
+  //
+  // RETURNS whether this bucket had not seen the post before, and every metric
+  // below is gated on it. A carousel arrives as one row PER SLIDE — each slide
+  // is a separate image to judge, so counting them as items is right — but all
+  // of them carry the same post-level like count, because that is the only like
+  // count the post has. Adding it per row reported 254.589 post likes on the
+  // Lowlands set where 103.007 was true: a 147% overstatement, produced by a
+  // handful of long carousels. Judging counts slides; audience figures count
+  // posts, and the two must not share a counter.
   const keys = new WeakMap<object, { all: Set<string>; hit: Set<string> }>()
-  const track = (bucket: object, r: CampaignRow) => {
+  const track = (bucket: object, r: CampaignRow): boolean => {
     let k = keys.get(bucket)
     if (!k) keys.set(bucket, (k = { all: new Set(), hit: new Set() }))
+    const firstOfPost = !k.all.has(r.postKey)
     k.all.add(r.postKey)
     if (isStelzStory(r.verdict)) k.hit.add(r.postKey)
+    return firstOfPost
   }
   const settle = (bucket: { posts: number; postsWithStelz: number }) => {
     const k = keys.get(bucket)
@@ -360,7 +375,7 @@ export function campaignRollup(
 
   const bump = (s: SurfaceStats, r: CampaignRow) => {
     s.items += 1
-    track(s, r)
+    const firstOfPost = track(s, r)
     s.imagesSeen += r.framesJudged
     if (r.verdict === 'unanalysed') s.unanalysed += 1
     else s.judged += 1
@@ -369,7 +384,7 @@ export function campaignRollup(
     if (r.coverOnly) s.coverOnly += 1
     if (r.placement && isStelzStory(r.verdict)) s.offContainer += 1
     const m = metricFor(r)
-    if (m != null) s.metric = (s.metric ?? 0) + m
+    if (m != null && firstOfPost) s.metric = (s.metric ?? 0) + m
     if (r.postedAt && (!s.lastPostedAt || r.postedAt > s.lastPostedAt)) {
       s.lastPostedAt = r.postedAt
     }
@@ -394,7 +409,7 @@ export function campaignRollup(
     bump(out.bySurface[r.surface], r)
 
     out.items += 1
-    track(out, r)
+    const firstForOut = track(out, r)
     out.imagesSeen += r.framesJudged
     if (r.verdict === 'unanalysed') out.unanalysed += 1
     else out.judged += 1
@@ -405,19 +420,20 @@ export function campaignRollup(
 
     const src = out.bySource[r.source]
     src.items += 1
-    track(src, r)
+    const firstForSrc = track(src, r)
     if (r.verdict === 'unanalysed') { /* not judged; counted in items only */ }
     else src.judged += 1
     if (isStelzStory(r.verdict)) src.withStelz += 1
     if (r.verdict === 'near') src.near += 1
-    if (r.surface === 'tiktok') src.tiktokViews += r.views ?? 0
+    if (r.surface === 'tiktok' && firstForSrc) src.tiktokViews += r.views ?? 0
     accounts[r.source].add((r.platformHandle || r.creatorHandle || '').toLowerCase())
 
     // Kept in three separate fields rather than one "reach". Nothing in this
-    // file adds them together, and nothing downstream should either.
-    if (r.surface === 'tiktok') out.tiktokViews += r.views ?? 0
-    if (r.surface === 'story') out.pollVotes += r.pollVotes ?? 0
-    if (r.surface === 'post') out.postLikes += r.likes ?? 0
+    // file adds them together, and nothing downstream should either. All three
+    // count each post once — see `track`.
+    if (r.surface === 'tiktok' && firstForOut) out.tiktokViews += r.views ?? 0
+    if (r.surface === 'story' && firstForOut) out.pollVotes += r.pollVotes ?? 0
+    if (r.surface === 'post' && firstForOut) out.postLikes += r.likes ?? 0
   }
 
   settle(out)

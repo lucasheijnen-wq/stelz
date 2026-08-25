@@ -11,35 +11,29 @@
 // The mirror is cosmetic. Anything that relies on `canWrite` for safety rather
 // than for clarity is a bug — the server is the authority.
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
+import { MembershipCtx, useMembership } from './membershipContext'
 import { fbIsBrandMember, fbBrandHasMembers } from './firestore'
-import { useAuth } from './auth'
-
-type Membership = {
-  /** Undefined while the check is in flight — render neither state yet. */
-  isMember: boolean | undefined
-  /** Convenience: false while loading, so buttons start disabled, not enabled. */
-  canWrite: boolean
-  /**
-   * The brand has no members at all, so it is up for grabs. The first caller of
-   * bootstrap becomes its owner — which is why this exists: the Run scan button
-   * is what calls bootstrap, so hiding it from non-members would leave a fresh
-   * brand with no way for anyone to ever claim it.
-   */
-  brandUnclaimed: boolean
-}
-
-const Ctx = createContext<Membership>({ isMember: undefined, canWrite: false, brandUnclaimed: false })
+import { useAuth } from './authContext'
+import { useResetOn } from './useResetOn'
 
 export function MembershipProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   const [isMember, setIsMember] = useState<boolean | undefined>(undefined)
   const [brandUnclaimed, setBrandUnclaimed] = useState(false)
 
-  useEffect(() => {
-    if (!user) { setIsMember(undefined); setBrandUnclaimed(false); return }
-    let cancelled = false
+  // A different account — or none — invalidates the previous answer, so it goes
+  // back to "unknown" rather than lingering. During render: `canWrite` gates
+  // admin-only nav and pages, and an effect would leave the previous user's
+  // answer standing for one painted frame after a switch.
+  useResetOn(user?.uid, () => {
     setIsMember(undefined)
+    setBrandUnclaimed(false)
+  })
+
+  useEffect(() => {
+    if (!user) return
+    let cancelled = false
     fbIsBrandMember(user.uid)
       .then(async (ok) => {
         if (cancelled) return
@@ -58,14 +52,10 @@ export function MembershipProvider({ children }: { children: ReactNode }) {
   }, [user])
 
   return (
-    <Ctx.Provider value={{ isMember, canWrite: isMember === true, brandUnclaimed }}>
+    <MembershipCtx.Provider value={{ isMember, canWrite: isMember === true, brandUnclaimed }}>
       {children}
-    </Ctx.Provider>
+    </MembershipCtx.Provider>
   )
-}
-
-export function useMembership(): Membership {
-  return useContext(Ctx)
 }
 
 /** Banner shown once per page for read-only visitors. */

@@ -20,7 +20,7 @@ export const imageUrlFor = _imageUrlFor
 
 // ────────────── Resonance ──────────────
 
-export function fetchResonanceForCreator(handle: string, _platform?: string): Promise<ResonanceRow | null> {
+export function fetchResonanceForCreator(handle: string): Promise<ResonanceRow | null> {
   return fbFetchResonanceForCreator(handle)
 }
 

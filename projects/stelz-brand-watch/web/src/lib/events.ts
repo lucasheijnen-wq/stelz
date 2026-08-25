@@ -18,7 +18,7 @@
 // ever gets slow, stamping is purely additive.
 
 import type { Source } from './campaign'
-import type { StelzEvent } from '../data/events'
+import { EVENTS, type StelzEvent, type EventRosterMember } from '../data/events'
 
 export type EventMatch = {
   eventId: string
@@ -114,6 +114,27 @@ export function rosterAccounts(ev: StelzEvent): Set<string> {
   return out
 }
 
+/**
+ * Was this account booked for anything, and by whom?
+ *
+ * The question a creator page has to answer before it can say anything useful
+ * about an empty result. "No detections for @davidscholten" and "@davidscholten
+ * was booked for Lowlands and posted nothing" are the same absence of data and
+ * opposite findings — the first reads as a gap in the tool, the second is the
+ * single most valuable line a paid roster produces.
+ *
+ * Matches on either platform, because the roster books a PERSON and Instagram
+ * and TikTok handles rarely agree.
+ */
+export function bookingFor(handle: string, events: StelzEvent[] = EVENTS):
+  { event: StelzEvent; member: EventRosterMember } | null {
+  const want = clean(handle)
+  if (!want) return null
+  return events.flatMap((event) => event.roster
+    .filter((m) => clean(m.instagram) === want || clean(m.tiktok) === want)
+    .map((member) => ({ event, member })))[0] ?? null
+}
+
 /** TikTok handle -> that person's Instagram handle.
  *
  *  Instagram wins because creator ids and project rosters are already built
@@ -182,16 +203,30 @@ export function seedTsv(ev: StelzEvent): string {
  *      bought reach into the organic column.
  *   3. Either handle on the roster -> ROSTER. Both columns, because the same
  *      person's TikTok and Instagram names differ.
- *   4. Otherwise a matching hashtag -> DISCOVERY, credited to the most specific
- *      tag that matched.
- *   5. Otherwise: not this event.
+ *   4. A matching hashtag -> DISCOVERY, credited to the most specific tag that
+ *      matched.
+ *   5. ACCOUNT EVIDENCE, last: a dated in-window post from a handle in
+ *      `evidencedHandles` -> DISCOVERY, foundVia 'profiel'. The set holds
+ *      accounts that proved their presence elsewhere — another in-window post
+ *      of theirs carries a matching tag. A festival-goer tags #lowlands on one
+ *      clip and not on the other four from the same campsite; the tagged one
+ *      proves the weekend, the untagged ones ride on that proof. Last, because
+ *      a tag on the post itself is stronger evidence and should win the
+ *      foundVia. The default is an empty set, so a caller that passes nothing
+ *      gets the exact pre-existing behaviour — and the window rule still runs
+ *      FIRST: evidence cannot pull last year's content in.
+ *   6. Otherwise: not this event.
  *
  *  Without a timestamp a roster post still matches (rule 3 does not consult the
- *  date) but a hashtag find does not. Asymmetric on purpose: a roster creator's
- *  undated post is at worst filed under the wrong event of theirs, while an
- *  undated hashtag hit is an unbounded invitation for old festival content to
- *  inflate the organic number. */
-export function matchEvent(ev: StelzEvent, item: Attributable): EventMatch | null {
+ *  date) but a hashtag find does not — and neither does account evidence.
+ *  Asymmetric on purpose: a roster creator's undated post is at worst filed
+ *  under the wrong event of theirs, while an undated hashtag hit is an
+ *  unbounded invitation for old festival content to inflate the organic
+ *  number. */
+export function matchEvent(
+  ev: StelzEvent, item: Attributable,
+  evidencedHandles: ReadonlySet<string> = EMPTY_EVIDENCE,
+): EventMatch | null {
   const roster = rosterAccounts(ev)
   const onRoster =
     roster.has(clean(item.scrapedFor)) ||
@@ -212,7 +247,50 @@ export function matchEvent(ev: StelzEvent, item: Attributable): EventMatch | nul
   }
   const tags = new Set((item.hashtags ?? []).map((t) => t.replace(/^#/, '').toLowerCase()))
   const hit = ordered.find((t) => tags.has(t))
-  return hit ? { eventId: ev.id, source: 'discovery', foundVia: hit } : null
+  if (hit) return { eventId: ev.id, source: 'discovery', foundVia: hit }
+
+  // Account evidence, LAST. A tag on the post itself is stronger and more
+  // specific, so it wins the foundVia; this rule only catches the untagged
+  // remainder of an account that proved its weekend elsewhere.
+  if (evidencedHandles.size > 0) {
+    const account = clean(item.platformHandle) || clean(item.creatorHandle)
+    if (account && evidencedHandles.has(account)) {
+      return { eventId: ev.id, source: 'discovery', foundVia: 'profiel' }
+    }
+  }
+  return null
+}
+
+/** Shared frozen default so the no-evidence call path allocates nothing. */
+const EMPTY_EVIDENCE: ReadonlySet<string> = new Set()
+
+/**
+ * The handles whose presence at this event is PROVEN: non-roster accounts with
+ * at least one dated in-window item carrying a matching tag (in the caption or
+ * as the recorded search tag). Feed the result back into matchEvent as
+ * `evidencedHandles` and the same account's untagged in-window posts count too.
+ *
+ * Built from the full row set in one pass, here rather than in a component, so
+ * the rule that GRANTS evidence and the rule that SPENDS it live in one file
+ * and cannot drift apart.
+ */
+export function evidencedHandlesFor(ev: StelzEvent, items: Attributable[]): Set<string> {
+  const roster = rosterAccounts(ev)
+  const ordered = orderedTags(ev)
+  const out = new Set<string>()
+  for (const item of items) {
+    const account = clean(item.platformHandle) || clean(item.creatorHandle)
+    if (!account || roster.has(account) || out.has(account)) continue
+    if (!item.postedAt || !inWindow(ev, item.postedAt)) continue
+    const recorded = (item.foundVia ?? '').replace(/^#/, '').toLowerCase()
+    // 'profiel' is what rule 4 WRITES, never evidence for it — otherwise one
+    // pass's output becomes the next pass's proof and the set only grows.
+    if (recorded === 'profiel') continue
+    if (recorded && ordered.includes(recorded)) { out.add(account); continue }
+    const tags = (item.hashtags ?? []).map((t) => t.replace(/^#/, '').toLowerCase())
+    if (tags.some((t) => ordered.includes(t))) out.add(account)
+  }
+  return out
 }
 
 function shiftDays(iso: string, days: number): string {

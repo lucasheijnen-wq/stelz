@@ -7,8 +7,15 @@ there is nothing capturing them, so every hour of a running campaign is
 permanently lost — and Lowlands is running right now.
 
 This needs no deploy and no Firebase credentials: it talks to Apify and to the
-CDN, and writes to .tmp/stories-archive/ (already gitignored). 63_stories_
-backfill.py replays the archive into Firestore once the deploy lands.
+CDN, and writes to .tmp/events/<event>/stories/ (already gitignored).
+
+WHERE THE ARCHIVE LIVES, AND WHERE IT DOES NOT. On this machine, and nowhere
+else. Nothing here writes to Firestore: neither an ingest endpoint nor a
+backfill script exists yet, so the dashboard reads these stories through the
+dev-server fixture (61_stories_preview_fixture.py, 72_campaign_fixture.py) and
+a deployed instance would show none of them. This file and its raw/ payloads
+ARE the record — the CDN links inside them die within hours and the stories
+themselves within 24, so a lost .tmp/ cannot be re-harvested.
 
     # free: re-read the dataset the last run already produced
     ./firebase/functions/venv/bin/python \\
@@ -168,10 +175,12 @@ def main() -> int:
                 skipped += 1
                 continue
 
-            # The raw payload is kept verbatim: the backfill re-normalises with
-            # whatever _normalize_item looks like THEN, so a later fix to the
-            # parser can be applied to stories already archived. A pre-digested
-            # archive would freeze today's bugs into the record.
+            # The raw payload is kept verbatim so a later reader can re-normalise
+            # with whatever _normalize_item looks like THEN. A pre-digested
+            # archive freezes today's parser into the record — which is not
+            # hypothetical: the index below carried eight fields for months and
+            # 75_backfill_event_fields.py recovered the poll counts from exactly
+            # these files, for stories that had long since expired.
             (P.raw / f"{sid}.json").write_text(json.dumps(item))
 
             img = P.media / f"{sid}.jpg"
@@ -196,6 +205,27 @@ def main() -> int:
                 "video_file": vid_name,
                 "raw_file": f"{sid}.json",
                 "event": ev["id"],
+                # The story's own numbers, carried into the index rather than
+                # left in the raw payload.
+                #
+                # A story publishes NO view count — Instagram shows that to the
+                # account holder and to nobody else. Poll votes are the only
+                # hard figure a story produces, and they are a floor on viewers
+                # rather than a reach number: every vote is one person who saw
+                # it and touched it. Leaving them out made the story column of
+                # the campaign page permanently blank while the stories page,
+                # reading the same payloads, showed 86,718 of them.
+                "poll_votes": norm.get("poll_votes") or 0,
+                "poll_count": norm.get("poll_count") or 0,
+                "poll_questions": norm.get("poll_questions") or [],
+                "hashtags": norm.get("hashtags") or [],
+                "mentions": norm.get("mentions") or [],
+                "music": norm.get("music"),
+                "is_paid_partnership": bool(norm.get("is_paid_partnership")),
+                "full_name": norm.get("full_name"),
+                "verified": norm.get("is_verified"),
+                "duration": norm.get("video_duration"),
+                "link_urls": norm.get("link_urls") or [],
             }) + "\n")
             seen.add(sid)
             added += 1
@@ -205,9 +235,10 @@ def main() -> int:
     if dead:
         print(f"  {dead} image link(s) already dead — metadata kept, picture lost")
     print(f"  +{bytes_saved / 1e6:.1f} MB · {total} stories in {P.label()}")
-    print("\n  Re-run every few hours while the campaign runs; already-archived")
-    print("  stories are skipped. Load into the tool with 63_stories_backfill.py")
-    print("  once api_ingest_stories is deployed.")
+    print("\n  Re-run every few hours while the event runs — a story is gone 24h")
+    print("  after it is posted and already-archived ones are skipped. See")
+    print("  sweep_stories.sh for the loop, and note that this archive is LOCAL:")
+    print("  nothing writes these to Firestore yet.")
     return 0
 
 

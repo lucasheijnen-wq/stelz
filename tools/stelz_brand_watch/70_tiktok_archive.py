@@ -143,6 +143,12 @@ def normalise(item: dict, fallback_handle: str) -> dict | None:
         "verified": bool(author.get("verified")),
         "is_ad": bool(item.get("isAd") or item.get("isSponsored")),
         "is_slideshow": bool(item.get("isSlideshow")),
+        # What language the caption is in, as TikTok detected it. The audience
+        # question a Dutch brand actually has is "is this crowd Dutch", and this
+        # is the only field in either platform's payload that answers it — no
+        # location, no region, no age. None rather than "" when absent, because
+        # "unknown language" and "no language" are different things.
+        "text_language": item.get("textLanguage") or None,
         "music": {"title": mm.get("musicName"), "artist": mm.get("musicAuthor"),
                   "original": bool(mm.get("musicOriginal"))} if mm else None,
     }

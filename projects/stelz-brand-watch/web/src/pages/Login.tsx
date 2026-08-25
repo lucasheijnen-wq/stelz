@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Logo } from '../components/ui'
-import { useAuth, authErrorMessage } from '../lib/auth'
-
+import { useAuth } from '../lib/authContext'
+import { authErrorMessage } from '../lib/authErrors'
 export default function Login() {
   const { user, loading, signInGoogle } = useAuth()
   const nav = useNavigate()

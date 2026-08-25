@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { joinCampaign, campaignRollup, metricFor, stelzShare, SURFACES } from './campaign'
-import { matchEvent, inWindow } from './events'
+import { evidencedHandlesFor, matchEvent, inWindow } from './events'
 import { getEvent, type StelzEvent } from '../data/events'
 import type { CampaignItem } from './campaign'
 import type { DetectionRow } from './types'
@@ -123,24 +123,80 @@ describe.skipIf(!present)('the roster / discovery split in the real fixture', ()
     }
   })
 
-  it('never counts the same post as both paid and organic', () => {
-    // 73_lowlands_discovery.py drops anything a roster handle posted, whichever
+  it('never counts a booked account as organic pickup', () => {
+    // 73_lowlands_discovery.py drops anything a BOOKED handle posted, whichever
     // hashtag surfaced it. If that check breaks, bought content starts being
     // reported as organic pickup — the single most flattering error this page
     // could make.
-    const rosterAccounts = new Set(
-      rows.filter((r) => r.source === 'roster')
-        .map((r) => (r.platformHandle ?? r.creatorHandle).toLowerCase()))
+    //
+    // Measured against the event definition, NOT against "every account that
+    // appears on a roster row". Those are different sets, and the difference is
+    // collab posts: Instagram publishes a collaboration on both authors'
+    // profiles, so @stanlucas.m turns up as the platformHandle of a post
+    // credited to @joshbram_ without ever having been booked. His own TikTok,
+    // found via #lowlands, is genuinely organic — and an earlier version of
+    // this test called that a violation.
+    const booked = new Set<string>()
+    for (const m of (getEvent('lowlands-2026') as StelzEvent).roster) {
+      if (m.instagram) booked.add(m.instagram.toLowerCase())
+      if (m.tiktok) booked.add(m.tiktok.toLowerCase())
+    }
     for (const r of rows.filter((r) => r.source === 'discovery')) {
       const acct = (r.platformHandle ?? r.creatorHandle).toLowerCase()
-      expect(rosterAccounts.has(acct), `${acct} is on the roster and in discovery`).toBe(false)
+      expect(booked.has(acct), `${acct} is booked and yet counted as organic`).toBe(false)
+      expect(booked.has((r.creatorHandle ?? '').toLowerCase()),
+        `${r.creatorHandle} is booked and yet counted as organic`).toBe(false)
     }
   })
 
-  it('gives every discovery row the hashtag that found it', () => {
+  it('never puts one post on both sides of the split', () => {
+    // The stricter half of the same worry, and the one that actually inflates a
+    // number: a single post counted once as delivered and once as organic.
+    // A co-author appearing in both sets is fine; a post doing so is not.
+    const byId = new Map<string, string>()
+    for (const r of rows) {
+      const seen = byId.get(r.itemId)
+      expect(seen === undefined || seen === r.source,
+        `${r.itemId} is both ${seen} and ${r.source}`).toBe(true)
+      byId.set(r.itemId, r.source)
+    }
+    const postSides = new Map<string, Set<string>>()
+    for (const r of rows) {
+      const set = postSides.get(r.postKey) ?? new Set<string>()
+      set.add(r.source)
+      postSides.set(r.postKey, set)
+    }
+    for (const [key, sides] of postSides) {
+      expect([...sides], `${key} spans both sources`).toHaveLength(1)
+    }
+  })
+
+  it('kan elke discovery-rij verantwoorden: een zoektag, of accountbewijs', () => {
+    // Vroeger droeg élke discovery-rij zijn zoektag — discovery kón alleen uit
+    // tagzoekopdrachten komen. Sinds de profielscrapes bestaat er een tweede
+    // soort: de ongetagde rij van een account dat elders in het venster wél
+    // een tag-match heeft. Die krijgt zijn foundVia ('profiel') pas op het
+    // dashboard, van matchEvent. Wat NIET mag bestaan is een discovery-rij
+    // zonder tag én zonder bewijs — die is op geen enkele manier aan het
+    // evenement te verantwoorden.
     const disc = rows.filter((r) => r.source === 'discovery')
     if (disc.length === 0) return
-    expect(disc.every((r) => (r.foundVia ?? '').length > 0)).toBe(true)
+    const ev = getEvent('lowlands-2026') as StelzEvent
+    const evidenced = evidencedHandlesFor(ev, rows)
+    const orphans = disc.filter((r) => {
+      if ((r.foundVia ?? '').length > 0) return false
+      const account = (r.platformHandle || r.creatorHandle || '').toLowerCase()
+      return !evidenced.has(account)
+    })
+    // Wezen MOGEN in de fixture bestaan — de profielscrape van een getagde
+    // vriend haalt ook diens niet-festivalposts binnen (@vara_gids is een
+    // tv-gids; getagd wórden is geen bewijs dat je eigen feed Lowlands is).
+    // Wat niet mag: dat zo'n rij het dashboard haalt. matchEvent moet elke
+    // wees afwijzen, en dat is precies wat hier vastligt.
+    for (const r of orphans) {
+      expect(matchEvent(ev, r, evidenced), `${r.postKey} is een wees en telt toch mee`)
+        .toBeNull()
+    }
   })
 
   it('keeps the two view counts separate and adding up', () => {
@@ -238,5 +294,102 @@ describe.skipIf(!present)('an event with nothing in it', () => {
     const rollup = campaignRollup([], {}, [])
     expect(rollup.creators).toHaveLength(0)
     expect(rollup.silent).toBe(0)
+  })
+})
+
+describe.skipIf(!present)('every surface brings the one figure it publishes', () => {
+  const items = present ? read<CampaignItem>(ITEMS) : []
+  const dets = present ? read<DetectionRow>(DETS) : []
+  const rows = joinCampaign(items, dets)
+  const rollup = campaignRollup(rows)
+
+  it('carries story poll votes through to the page', () => {
+    // 62 wrote eight fields per story and left the rest in the raw payload, so
+    // this column was blank for months while the stories page — reading the
+    // SAME payloads — showed 86,718 votes. A story publishes no view count at
+    // all; poll votes are the only hard figure it produces, and a surface whose
+    // one number never arrives looks like a surface that produced nothing.
+    const stories = rows.filter((r) => r.surface === 'story')
+    if (stories.length === 0) return
+    expect(rollup.pollVotes).toBeGreaterThan(0)
+    expect(rollup.bySurface.story.metric).toBe(rollup.pollVotes)
+  })
+
+  it('gives Instagram posts their likes', () => {
+    const posts = rows.filter((r) => r.surface === 'post')
+    if (posts.length === 0) return
+    expect(rollup.postLikes).toBeGreaterThan(0)
+    expect(posts.some((r) => (r.likes ?? 0) > 0)).toBe(true)
+  })
+
+  it('never lets one surface borrow another\'s metric', () => {
+    for (const r of rows) {
+      if (r.surface === 'story') {
+        // Instagram shows story views to the account holder and nobody else.
+        expect(r.views, `story ${r.itemId} has views`).toBeNull()
+      }
+      if (r.surface !== 'story') {
+        expect(r.pollVotes, `${r.surface} ${r.itemId} has poll votes`).toBeFalsy()
+      }
+    }
+  })
+
+  it('keeps the three totals as three numbers', () => {
+    // The one figure a client always asks for and that nothing here computes:
+    // plays, likes and votes are three different events. If some field ever
+    // equals their sum, a "total reach" has been invented.
+    const sum = rollup.tiktokViews + rollup.postLikes + rollup.pollVotes
+    const nonZero = [rollup.tiktokViews, rollup.postLikes, rollup.pollVotes]
+      .filter((v) => v > 0).length
+    if (nonZero > 1) {
+      expect(Object.values(rollup).includes(sum)).toBe(false)
+    }
+  })
+
+  it('splits TikTok views by who earned them and adds up', () => {
+    // Paid delivery and organic pickup are worth different things. Kept apart
+    // at every level, and the two halves must still account for the whole.
+    expect(rollup.bySource.roster.tiktokViews + rollup.bySource.discovery.tiktokViews)
+      .toBe(rollup.tiktokViews)
+  })
+})
+
+// De kruisarchief-merge in 72_campaign_fixture.py. Dezelfde clip kwam via twee
+// routes binnen — als tagvondst in het discovery-archief én via de
+// profielscrape van de poster — en stond dus twee keer in de fixture: het
+// trefferaantal telde dezelfde waarneming dubbel en de grid tekende twee
+// identieke kaarten. In productie kan dat niet (één document per platform-id),
+// dus de fixture moet het ook niet kunnen.
+describe.skipIf(!present)('geen inhoud dubbel in de fixture', () => {
+  const items = present ? read<CampaignItem>(ITEMS) : []
+
+  it('bevat dezelfde dia of video nooit twee keer', () => {
+    // Identiteit zoals 72 hem legt: account + shortcode + dia voor Instagram,
+    // account + video-id voor TikTok. De id-TEKST verschilt per archief
+    // (discovery zet "ig" voor IG-ids), dus die is geen identiteit.
+    const seen = new Map<string, string>()
+    for (const i of items) {
+      if (i.surface === 'story') continue // stories staan maar in één archief
+      const handle = (i.platformHandle || i.creatorHandle || '').toLowerCase()
+      const key = i.surface === 'post'
+        ? `ig/${handle}/${i.postKey}/${i.slot ?? ''}`
+        : `tt/${handle}/${i.postKey}`
+      const before = seen.get(key)
+      expect(before, `${i.itemId} en ${before} zijn dezelfde inhoud, twee rijen`)
+        .toBeUndefined()
+      seen.set(key, i.itemId)
+    }
+  })
+
+  it('behield bij het samenvoegen de zoektag én de cijfers', () => {
+    // De twee kopieën verdelen de waarheid: de profielscrape draagt de likes,
+    // de tagvondst draagt found_via — het bewijs waarop de accountregel
+    // ongetagde posts laat meetellen. Gepind op een bekende samengevoegde dia;
+    // op een fixture van een ander evenement bestaat die niet en zegt deze
+    // test niets.
+    const slide = items.find((i) => i.postKey === 'DcVc6PRDG0u' && i.slot === 12)
+    if (!slide) return
+    expect(slide.foundVia).toBe('lowlands2026')
+    expect(slide.likes).not.toBeNull()
   })
 })

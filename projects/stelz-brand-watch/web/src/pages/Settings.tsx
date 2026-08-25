@@ -27,7 +27,9 @@ import {
   type BrandDoc,
   type HashtagPoolEntry,
 } from '../lib/firestore'
-import { useMembership, ReadOnlyNotice } from '../lib/membership'
+import { ReadOnlyNotice } from '../lib/membership'
+import { useMembership } from '../lib/membershipContext'
+import { useResetOn } from '../lib/useResetOn'
 
 type SectionId = 'brand' | 'detector' | 'hashtags' | 'access' | 'maintenance' | 'advanced' | 'danger'
 
@@ -235,18 +237,28 @@ function TrainingSection() {
   const fileRef = useRef<HTMLInputElement>(null)
   const { canWrite } = useMembership()
 
-  async function refresh() {
-    setLoadingRefs(true)
-    try {
-      const [list, brand] = await Promise.all([fbListReferenceImages(), fbGetBrand()])
-      setItems(list)
-      setIdentity(brand?.visualIdentity ?? '')
-      setWordmarks((brand?.wordmarkAliases ?? []).join(', '))
-      setCentroidComputedAt(brand?.visualCentroidComputedAt ?? null)
-    } catch (e) { setErr((e as Error).message) }
-    finally { setLoadingRefs(false) }
-  }
-  useEffect(() => { void refresh() }, [])
+  // De fetch staat in het effect; wie verse gegevens wil, bumpt `reloadKey`.
+  // Als losse functie die het mount-effect aanriep was dit precies wat
+  // react-hooks/set-state-in-effect afvangt. En het levert annulering op, die
+  // er niet was: wie tijdens het laden wegnavigeert kreeg nog een setState.
+  const [reloadKey, setReloadKey] = useState(0)
+  const refresh = () => { setLoadingRefs(true); setReloadKey((k) => k + 1) }
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const [list, brand] = await Promise.all([fbListReferenceImages(), fbGetBrand()])
+        if (cancelled) return
+        setItems(list)
+        setIdentity(brand?.visualIdentity ?? '')
+        setWordmarks((brand?.wordmarkAliases ?? []).join(', '))
+        setCentroidComputedAt(brand?.visualCentroidComputedAt ?? null)
+      } catch (e) { if (!cancelled) setErr((e as Error).message) }
+      finally { if (!cancelled) setLoadingRefs(false) }
+    })()
+    return () => { cancelled = true }
+  }, [reloadKey])
 
   async function saveIdentity() {
     setSavingIdentity(true); setMsg(null); setErr(null)
@@ -267,7 +279,7 @@ function TrainingSection() {
         if (f.size > 8 * 1024 * 1024) { setErr(`${f.name} is over 8 MB — skipped`); continue }
         await fbUploadReferenceImage(f)
       }
-      await refresh()
+      refresh()
       setMsg(`Uploaded ${arr.length} image${arr.length === 1 ? '' : 's'}. Recomputing detection profile…`)
       void autoRecompute()
     } catch (e) { setErr((e as Error).message) }
@@ -282,7 +294,7 @@ function TrainingSection() {
     setUploading(true); setErr(null)
     try {
       await fbDeleteReferenceImage(item.id, item.storagePath)
-      await refresh()
+      refresh()
       void autoRecompute()
     } catch (e) { setErr((e as Error).message) }
     finally { setUploading(false) }
@@ -296,7 +308,7 @@ function TrainingSection() {
       else if ((r.refsFound ?? 0) === 0) setMsg('Upload at least one reference image to enable the visual filter.')
       else if ((r.fetchErrors ?? []).length > 0) setErr(`Couldn't process ${r.fetchErrors.length} of ${r.refsFound} images. First error: ${r.fetchErrors[0]}`)
       else setErr("Reference images uploaded but couldn't be processed. Try re-uploading.")
-      await refresh()
+      refresh()
     } catch (e) { setErr(`Auto-refresh failed: ${(e as Error).message}`) }
     finally { setCentroidBusy(false) }
   }
@@ -496,8 +508,19 @@ function HashtagPoolSection() {
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
-  async function refresh() { setItems(await fbListHashtagPool()) }
-  useEffect(() => { void refresh() }, [])
+  // Zelfde reden als hierboven: de fetch hoort in het effect, aanroepers vragen
+  // een nieuwe ronde aan.
+  const [reloadKey, setReloadKey] = useState(0)
+  const refresh = () => setReloadKey((k) => k + 1)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const list = await fbListHashtagPool()
+      if (!cancelled) setItems(list)
+    })()
+    return () => { cancelled = true }
+  }, [reloadKey])
 
   async function save(next: HashtagPoolEntry[], replace = false) {
     // Guards every caller at once — the Add button, the active checkbox, the
@@ -514,7 +537,7 @@ function HashtagPoolSection() {
           ({ tag, platform, priority, active, family, maxResults, kind })),
         replaceHashtags: replace,
       })
-      await refresh()
+      refresh()
       setMsg('Saved')
       setTimeout(() => setMsg(null), 2000)
     } catch (e) { setErr((e as Error).message) }
@@ -715,8 +738,9 @@ function CapInput({ value, disabled, onCommit }: {
 }) {
   const [draft, setDraft] = useState<string>(value == null ? '' : String(value))
   // Re-sync when the saved value changes underneath (another row's save
-  // triggered a refresh).
-  useEffect(() => { setDraft(value == null ? '' : String(value)) }, [value])
+  // triggered a refresh). Tijdens de render, niet in een effect: als effect
+  // stond het veld een frame lang op de oude waarde nadat de nieuwe binnen was.
+  useResetOn(value, () => setDraft(value == null ? '' : String(value)))
   const commit = () => {
     const v = parseInt(draft)
     const next = Number.isFinite(v) ? v : null
@@ -765,10 +789,16 @@ function TeamSection() {
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
+  // "Could not load" and "empty" are opposite findings and must not share a
+  // render path: the server refuses this list to non-members (403), and
+  // mapping that onto an empty array showed a read-only tester the raw error
+  // text PLUS "Nobody has moderator access yet" — a false statement about a
+  // brand that has owners.
+  const [loadFailed, setLoadFailed] = useState(false)
   useEffect(() => {
     fbListMembers()
       .then(setMembers)
-      .catch((e) => { setMembers([]); setErr((e as Error).message) })
+      .catch(() => setLoadFailed(true))
   }, [])
 
   async function add() {
@@ -846,7 +876,12 @@ function TeamSection() {
 
         <ErrorInline msg={err} />
 
-        {members === null ? (
+        {loadFailed ? (
+          <div className="text-[12px] text-[var(--color-ink-muted)] leading-relaxed">
+            De ledenlijst kon niet worden opgehaald — de server toont hem alleen
+            aan leden. Vraag een teamlid met toegang wie je toegang kan geven.
+          </div>
+        ) : members === null ? (
           <div className="text-[12px] text-[var(--color-ink-muted)]">Loading…</div>
         ) : members.length === 0 ? (
           <div className="border border-dashed border-[var(--color-border-strong)] py-8 text-center text-[12px] text-[var(--color-ink-muted)]">
@@ -998,6 +1033,7 @@ function AdvancedSection() {
   const [confidenceMin, setConfidenceMin] = useState(0.7)
   const [dailyBudget, setDailyBudget] = useState(5)
   const [storiesAutoScan, setStoriesAutoScan] = useState(false)
+  const [dailyAutoScan, setDailyAutoScan] = useState(false)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -1008,6 +1044,7 @@ function AdvancedSection() {
       if (typeof b.confidenceMin === 'number') setConfidenceMin(b.confidenceMin)
       if (typeof b.dailyBudgetUsd === 'number') setDailyBudget(b.dailyBudgetUsd)
       setStoriesAutoScan(b.storiesAutoScan === true)
+      setDailyAutoScan(b.dailyAutoScan === true)
     })
   }, [])
 
@@ -1018,6 +1055,7 @@ function AdvancedSection() {
         confidenceMin,
         dailyBudgetUsd: dailyBudget,
         storiesAutoScan,
+        dailyAutoScan,
       })
       setMsg('Saved')
       setTimeout(() => setMsg(null), 2500)
@@ -1056,6 +1094,21 @@ function AdvancedSection() {
                 onChange={(e) => setStoriesAutoScan(e.target.checked)}
               />
               <span>{storiesAutoScan ? 'Aan — elke 6 uur' : 'Uit'}</span>
+            </label>
+          </Field>
+
+          <Field
+            label="Dagelijkse scan"
+            hint="Elke ochtend om 07:00 een volledige scan: hashtags, creators, profielen, scenes en resonantie. De scan maakt zichzelf passend binnen het resterende dagbudget voordat er iets wordt uitgegeven — de limiet hieronder is dus ook hier de baas."
+          >
+            <label className="flex items-center gap-2 text-[13px]">
+              <input
+                type="checkbox"
+                checked={dailyAutoScan}
+                disabled={!canWrite}
+                onChange={(e) => setDailyAutoScan(e.target.checked)}
+              />
+              <span>{dailyAutoScan ? 'Aan — elke ochtend 07:00' : 'Uit'}</span>
             </label>
           </Field>
 

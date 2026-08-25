@@ -151,6 +151,23 @@ def scraping_allowed(brand_id: str) -> bool:
     return degrade_level(brand_id) < DEGRADE_NO_SCRAPE
 
 
+def remaining_budget_usd(brand_id: str) -> float:
+    """Dollars left in today's budget, for SIZING a scan before it commits.
+
+    The degrade ladder answers "how throttled are we NOW"; this answers "how
+    much may the scan about to be enqueued cost". Without it the shipped
+    defaults projected ~$40 against a $5 budget: the ladder let the scan
+    through at level 0 and the whole day's budget was spent in one click,
+    because Apify bills at ENQUEUE time and the ladder only reacts to spend
+    that already happened. Infinity on the fail-open path, matching
+    _spend_and_budget: a broken guard must not block the pipeline.
+    """
+    spend, budget = _spend_and_budget(brand_id)
+    if budget == float("inf") or budget <= 0:
+        return float("inf")
+    return max(0.0, budget - spend)
+
+
 def budget_exhausted(brand_id: str) -> bool:
     """True only at the hardest degrade level, where even cache-miss detection
     is refused. Deliberately conservative: work already scraped should finish,

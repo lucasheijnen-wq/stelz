@@ -91,12 +91,17 @@ describe('what one action costs', () => {
     expect(hashtagScanCost(500, 50)).toBeCloseTo(25_000 * 0.0023, 6)
   })
 
-  it('shows that one hashtag scan exceeds a $5 day by an order of magnitude', () => {
-    // ~$57.50 for a single "Run scan" click. This is the number the old, unused
-    // frontend table reported as $5.00, and the reason costs go on screen at all.
+  it('shows that one hashtag scan still projects above a $5 day', () => {
+    // History: the shipped defaults (500×50) projected ~$57.50 per click —
+    // an order of magnitude over the daily budget, and the reason costs went
+    // on screen at all. The defaults are now 150×30 (~$10) and the SERVER
+    // trims any request to the remaining budget before enqueueing — so the
+    // projection here is the opening bid, not what gets spent. It must still
+    // read as "more than a day" though: that gap is why the trim exists, and
+    // a card claiming a click fits comfortably inside $5 would hide it.
     const scan = hashtagScanCost(DEFAULTS.hashtagPerTag, DEFAULTS.hashtagMaxTags)
-    expect(scan).toBeGreaterThan(50)
-    expect(scan / 5).toBeGreaterThan(10)
+    expect(scan).toBeGreaterThan(5)
+    expect(scan).toBeLessThan(50) // the order-of-magnitude era must not return
   })
 
   it('spells out the arithmetic behind every price', () => {
@@ -119,7 +124,9 @@ describe('projection', () => {
     // manual buttons would be inventing a usage pattern.
     const p = projection(28, true)
     expect(p.fixedPerMonth).toBeCloseTo(0.183 * 4 * 30, 4)
-    expect(p.perHashtagScan).toBeGreaterThan(50)
+    // Same bound as the price-card test above: the per-click projection sits
+    // above a $5 day (why the server-side trim exists) at the new defaults.
+    expect(p.perHashtagScan).toBeGreaterThan(5)
   })
 
   it('is zero fixed cost when automatic fetching is off', () => {

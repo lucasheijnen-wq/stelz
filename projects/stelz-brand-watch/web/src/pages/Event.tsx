@@ -27,28 +27,41 @@ import { Kpi } from '../components/campaign/Kpi'
 import { SurfaceCard } from '../components/campaign/SurfaceCard'
 import { ContentCard } from '../components/campaign/ContentCard'
 import { CreatorTable } from '../components/campaign/CreatorTable'
+import { NumbersTab } from '../components/campaign/NumbersTab'
+import { AudienceTab } from '../components/campaign/AudienceTab'
+import { CampaignHeader } from '../components/campaign/CampaignHeader'
 import {
   joinCampaign, campaignRollup, stelzShare,
   SURFACE_LABEL, SURFACES,
   type CampaignRow, type Surface, type CampaignItem,
 } from '../lib/campaign'
 import { isStelzStory } from '../lib/storyStats'
+import { stelzHits, hitTotals, followerIndex, groupHitsByPost } from '../lib/hits'
 import { getEvent, type StelzEvent } from '../data/events'
 import {
-  matchEvent, eventWindow, formatWindow, eventStatus, seedTsv,
+  matchEvent, evidencedHandlesFor, eventWindow, formatWindow, eventStatus, seedTsv,
 } from '../lib/events'
 import { fbFetchCreatorProfiles, type CreatorProfile } from '../lib/firestore'
 import { fetchProjects, projectsAction, type Project } from '../lib/data'
-import { useMembership } from '../lib/membership'
-import type { DetectionRow } from '../lib/types'
+import { useMembership } from '../lib/membershipContext'
 import { fmtNum, compactNum } from '../lib/format'
-import { useCampaignPreview, useCampaignDetectionsPreview } from '../lib/devPreview'
+import { useEventAudience, useEventCampaign } from '../lib/eventData'
 
-type Tab = 'roster' | 'discovery' | 'stories' | 'settings'
+type Tab = 'roster' | 'discovery' | 'cijfers' | 'publiek' | 'stories' | 'settings'
 
 const TABS: { id: Tab; label: string; sub: string }[] = [
   { id: 'roster', label: 'Roster', sub: 'wat de geboekte creators plaatsten' },
   { id: 'discovery', label: 'Los gevonden', sub: 'iedereen daarbuiten' },
+  // The only tab that puts both sources in one view. Everywhere else they are
+  // kept apart because paid delivery and organic pickup are worth different
+  // things — but "hoe doet Stëlz het op social" is exactly the question that
+  // wants them beside each other, so this tab answers it with a Bron column
+  // keeping every row attributable.
+  { id: 'cijfers', label: 'Cijfers', sub: 'alle treffers met hun cijfers' },
+  // Not posts but PEOPLE: who comments, who gets tagged, who was at the
+  // festival posting on their own account. Its own tab because the rows are a
+  // different kind of thing and carry different denominators.
+  { id: 'publiek', label: 'Publiek', sub: 'de mensen eromheen' },
   { id: 'stories', label: 'Stories', sub: 'de 24-uurs laag' },
   { id: 'settings', label: 'Instellingen', sub: 'roster, periode, hashtags' },
 ]
@@ -93,8 +106,11 @@ function EventBody({ ev, params, setParams }: {
   const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState<CampaignRow | null>(null)
 
-  const previewItems = useCampaignPreview()
-  const previewDetections = useCampaignDetectionsPreview()
+  // Preview in dev, the imported Firestore rows in production — one hook,
+  // same downstream pipeline either way. See lib/eventData.
+  const { items: campaignItems, detections: campaignDetections,
+          preview, loading: campaignLoading } = useEventCampaign(ev.id)
+  const audience = useEventAudience(ev.id)
 
   useEffect(() => {
     let cancelled = false
@@ -121,25 +137,28 @@ function EventBody({ ev, params, setParams }: {
     () => [...new Set(ev.roster.map((m) => m.instagram.toLowerCase()))],
     [ev])
 
-  // Preview-only for now, and deliberately not faked from a partial live
-  // source. The three surfaces live in the posts collection and the only
-  // fetcher that exists reads `contentType == 'story'`, so a "live" version
-  // today would show stories and silently claim TikTok and feed posts were
-  // empty — the exact failure this page exists to cure.
+  // All three surfaces, wherever the rows came from (preview fixture or the
+  // imported Firestore set) — never a partial live source that would show
+  // stories while silently claiming TikTok and feed posts were empty.
   const allRows = useMemo(
-    () => joinCampaign(previewItems ?? ([] as CampaignItem[]),
-                       previewDetections ?? ([] as DetectionRow[])),
-    [previewItems, previewDetections],
+    () => joinCampaign(campaignItems ?? ([] as CampaignItem[]), campaignDetections),
+    [campaignItems, campaignDetections],
   )
 
   // ATTRIBUTION, ONCE, BEFORE ANYTHING IS COUNTED. matchEvent decides both
   // whether a row belongs to this event and on which side of the split it
   // falls, so the source label the fixture happened to bake in never overrides
   // the roster and the window.
+  //
+  // With ACCOUNT EVIDENCE: a festival-goer whose tagged clip proved the
+  // weekend gets their untagged in-window clips counted too (foundVia
+  // 'profiel'). Both halves — granting evidence and spending it — live in
+  // lib/events, so this component only connects them.
   const rows = useMemo(() => {
+    const evidenced = evidencedHandlesFor(ev, allRows)
     const out: CampaignRow[] = []
     for (const r of allRows) {
-      const m = matchEvent(ev, r)
+      const m = matchEvent(ev, r, evidenced)
       if (m) out.push({ ...r, source: m.source, foundVia: r.foundVia ?? m.foundVia })
     }
     return out
@@ -162,6 +181,12 @@ function EventBody({ ev, params, setParams }: {
                           tab === 'roster' ? roster : [])
   }, [scopeRows, profiles, roster, rollup, tab])
 
+  // The header's six figures, from the same hitTotals the Cijfers tab uses.
+  // A header that did its own arithmetic would eventually disagree with the
+  // table below it, and it would do so in front of the client.
+  const headerTotals = useMemo(
+    () => hitTotals(stelzHits(scopeRows), followerIndex(scopeRows)), [scopeRows])
+
   const shown = useMemo(() => {
     // Stëlz only. A roster item without the can is still counted — it is in
     // `judged` right above the grid — but it is not something to look at, and
@@ -169,7 +194,8 @@ function EventBody({ ev, params, setParams }: {
     let out = scopeRows.filter((r) => r.source === tab && isStelzStory(r.verdict))
     if (creator) out = out.filter((r) => r.creatorHandle === creator)
     if (surface) out = out.filter((r) => r.surface === surface)
-    return [...out].sort((a, b) => (b.postedAt ?? '').localeCompare(a.postedAt ?? ''))
+    // One card per POST, best sighting in front — see lib/hits.groupHitsByPost.
+    return groupHitsByPost(out)
   }, [scopeRows, tab, creator, surface])
 
   const setParam = (k: string, v: string | null) => {
@@ -195,7 +221,7 @@ function EventBody({ ev, params, setParams }: {
         </span>
       }
     >
-      {previewItems && (
+      {preview && (
         <Card className="mb-4 px-4 py-2.5 text-[12px] text-[var(--color-warn)]">
           Preview: echt gescrapte content uit een lokaal bestand, niet uit de database.
           De oordelen komen uit een lokale analyse met hetzelfde model en dezelfde
@@ -242,6 +268,12 @@ function EventBody({ ev, params, setParams }: {
         )}
       </Card>
 
+      {/* ABOVE THE TABS, ON PURPOSE. "How is Stëlz doing on social" is not a
+          question about the roster tab or the discovery tab — it is what the
+          page as a whole answers, and an answer that only appears once you pick
+          the right tab is one most readers never reach. */}
+      {allRows.length > 0 && <CampaignHeader totals={headerTotals} />}
+
       <div className="flex flex-wrap gap-2 mb-4">
         {TABS.map((t) => {
           const st = t.id === 'roster' || t.id === 'discovery' ? rollup.bySource[t.id] : null
@@ -272,7 +304,7 @@ function EventBody({ ev, params, setParams }: {
         })}
       </div>
 
-      {loading && allRows.length === 0 && tab !== 'settings' ? (
+      {(loading || campaignLoading) && allRows.length === 0 && tab !== 'settings' ? (
         <Card className="p-14 text-center text-[13px] text-[var(--color-ink-subtle)]">Laden…</Card>
       ) : tab === 'stories' ? (
         <StoriesView
@@ -287,6 +319,18 @@ function EventBody({ ev, params, setParams }: {
         }} />
       ) : allRows.length === 0 ? (
         <EmptyState ev={ev} />
+      ) : tab === 'publiek' ? (
+        <AudienceTab audience={audience} />
+      ) : tab === 'cijfers' ? (
+        <NumbersTab
+          rows={scopeRows}
+          ev={ev}
+          roster={roster}
+          profiles={profiles}
+          creator={creator}
+          onPickCreator={(h) => setParam('c', h === creator ? null : h)}
+          onOpen={setOpen}
+        />
       ) : (
         <>
           <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-4">
@@ -362,6 +406,25 @@ function EventBody({ ev, params, setParams }: {
             )}
           </Card>
 
+          {/* WHY THERE IS NO "TOTAAL BEREIK" ANYWHERE ON THIS PAGE. The three
+              surfaces publish three different things, and the one number a
+              client always asks for would describe none of them. Said here
+              rather than left as an absence, because an absence reads like an
+              oversight. */}
+          <Card className="mb-6 px-4 py-3 text-[12px] text-[var(--color-ink-muted)] leading-relaxed">
+            <strong className="font-medium text-[var(--color-ink)]">Over deze cijfers.</strong>{' '}
+            De drie oppervlakken publiceren verschillende dingen, dus ze worden hier nooit bij
+            elkaar opgeteld. <strong>TikTok</strong> geeft echte weergaven —
+            {scoped.tiktokViews > 0 ? ` ${fmtNum(scoped.tiktokViews)} in deze selectie` : ' geen'}.
+            <strong> Instagram-stories</strong> geven aan niemand behalve de accounthouder een
+            kijkcijfer; poll-stemmen
+            {scoped.pollVotes > 0 ? ` (${fmtNum(scoped.pollVotes)})` : ''} zijn de enige harde
+            ondergrens — elke stem is iemand die keek én tikte, dus het echte kijkcijfer ligt
+            hoger. <strong>Instagram-posts</strong> geven likes
+            {scoped.postLikes > 0 ? ` (${fmtNum(scoped.postLikes)})` : ''}, en alleen reels een
+            afspeelteller. Eén opgeteld &ldquo;bereik&rdquo; zou geen van deze dingen betekenen.
+          </Card>
+
           {rollup.missedByDeploy > 0 && (
             <Card className="mb-6 px-4 py-3 text-[12px] text-[var(--color-ink-muted)] leading-relaxed border-l-2 border-[var(--color-warn)]">
               <strong className="font-medium text-[var(--color-ink)]">
@@ -391,7 +454,7 @@ function EventBody({ ev, params, setParams }: {
               >{SURFACE_LABEL[surface]} ✕</button>
             )}
             <span className="ml-auto text-[11px] text-[var(--color-ink-subtle)] tabular-nums">
-              {fmtNum(shown.length)} met Stëlz getoond
+              {fmtNum(shown.length)} post{shown.length === 1 ? '' : 's'} met Stëlz getoond
             </span>
           </div>
 
@@ -403,10 +466,11 @@ function EventBody({ ev, params, setParams }: {
             </Card>
           ) : (
             <div className="flex flex-wrap gap-2 mb-8">
-              {shown.slice(0, 240).map((r) => (
+              {shown.slice(0, 240).map(({ row: r, moreSlides }) => (
                 <ContentCard
                   key={`${r.surface}_${r.itemId}`}
                   row={r}
+                  moreSlides={moreSlides}
                   showTag={tab === 'discovery'}
                   onOpen={() => setOpen(r)}
                 />

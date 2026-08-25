@@ -23,6 +23,8 @@ import {
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
 import { fbDb, fbAuth, fbStorage } from './firebase'
 import type { DetectionRow, ResonanceRow } from './types'
+import type { CampaignItem } from './campaign'
+import type { Audience } from './audience'
 import { spendBreakdown, type SpendLine } from './costs'
 
 // Default brand. Replace once brand switcher reads from auth context.
@@ -97,6 +99,12 @@ function mapDetection(d: QueryDocumentSnapshot<DocumentData>, brandId: string): 
     brand_id: brandId,
     detected: x.detected ?? null,
     is_false_positive: x.isFalsePositive ?? null,
+    // Optional analysis fields the local pipeline and the event import carry;
+    // absent on detections the deployed detector wrote before they existed.
+    frames_judged: (x.framesJudged as number | null) ?? null,
+    near_miss: (x.nearMiss as boolean | null) ?? null,
+    near_miss_reason: (x.nearMissReason as string | null) ?? null,
+    cover_only: (x.coverOnly as boolean | null) ?? null,
   }
 }
 
@@ -596,7 +604,12 @@ export async function fbBootstrapBrand(brandName = 'Stelz') {
 }
 
 // Per-step scan API. UI calls these sequentially and shows progress between them.
-export async function fbStepHashtags(perTag = 500, maxTags = 50) {
+// Defaults live HERE, not at the call sites. 500/50 projected ~$40 of Apify
+// against the $5 default daily budget — the whole day spent in one click. The
+// server now trims any request to fit the remaining budget (publish_tags),
+// but a client that asks for a sane size to begin with leaves the trim as the
+// safety net it should be, not the sizing mechanism.
+export async function fbStepHashtags(perTag = 150, maxTags = 30) {
   return authedFetch('api_step_hashtags', { brandId: BRAND_ID, perTag, maxTags })
 }
 export async function fbStepCreators(maxCreators = 80, postsPer = 8) {
@@ -629,6 +642,12 @@ export async function fbStepProfiles(limit = 500) {
 export async function fbStepSubcultures() {
   return authedFetch('api_step_subcultures', { brandId: BRAND_ID })
 }
+// The people around recent hits become discovery candidates and graph edges.
+// Free to re-run (reads Firestore only); must precede SRS, which reads the
+// edges this writes.
+export async function fbStepAudience() {
+  return authedFetch('api_step_audience', { brandId: BRAND_ID })
+}
 export async function fbStepSentiment(limit = 400) {
   return authedFetch('api_step_sentiment', { brandId: BRAND_ID, limit })
 }
@@ -647,6 +666,7 @@ export type BrandDoc = {
   embeddingThreshold?: number
   dailyBudgetUsd?: number
   storiesAutoScan?: boolean
+  dailyAutoScan?: boolean
   hashtagYield?: Record<string, number>
   visualCentroidComputedAt?: string | null
   visualCentroidRefCount?: number
@@ -668,6 +688,7 @@ export async function fbGetBrand(brandId = BRAND_ID): Promise<BrandDoc | null> {
     embeddingThreshold: x.embeddingThreshold,
     dailyBudgetUsd: x.dailyBudgetUsd,
     storiesAutoScan: x.storiesAutoScan === true,
+    dailyAutoScan: x.dailyAutoScan === true,
     hashtagYield: x.hashtagYield,
     visualCentroidComputedAt:
       x.visualCentroidComputedAt instanceof Timestamp
@@ -884,6 +905,9 @@ export function fbSubscribeInbox(
     orderBy('createdAt', 'desc'),
     fsLimit(50),
   )
+  // The error callback matters more than it looks: without one, a rules
+  // change or missing index leaves the bell permanently at zero — which is
+  // indistinguishable from "no news" and therefore never gets reported.
   return onSnapshot(q, (snap) => {
     onChange(
       snap.docs.map((d) => {
@@ -900,11 +924,14 @@ export function fbSubscribeInbox(
         }
       }),
     )
+  }, (err) => {
+    console.error('inbox subscription failed', err)
+    onChange([])
   })
 }
 
 export type ScanStepKey =
-  | 'hashtags' | 'creators' | 'stories' | 'profiles' | 'subcultures' | 'srs' | 'sentiment'
+  | 'hashtags' | 'creators' | 'stories' | 'profiles' | 'subcultures' | 'audience' | 'srs' | 'sentiment'
 
 export type ScanStep = {
   state: 'running' | 'done' | 'error'
@@ -974,6 +1001,12 @@ export function fbSubscribeScanState(
       skippedCount: (s.skippedCount as number) ?? 0,
       endReason: (s.endReason as string) ?? null,
     })
+  }, (err) => {
+    // Without this callback a rules change or dropped index makes the scan
+    // panel silently blank forever — the exact shape of failure the panel
+    // exists to make visible.
+    console.error('scan-state subscription failed', err)
+    onChange(null)
   })
 }
 
@@ -1007,6 +1040,9 @@ export function fbSubscribeStoriesState(
       lastChecked: typeof s.lastChecked === 'number' ? s.lastChecked : null,
       lastSkipped: typeof s.lastSkipped === 'string' ? s.lastSkipped : null,
     })
+  }, (err) => {
+    console.error('stories-state subscription failed', err)
+    onChange(null)
   })
 }
 
@@ -1212,4 +1248,92 @@ export async function fbMarkAllInboxRead(items: InboxItem[]) {
   await Promise.all(
     items.filter((i) => !i.read).map((i) => updateDoc(doc(fbDb, 'users', uid, 'inbox', i.id), { read: true })),
   )
+}
+
+// ────────────── Imported events (posts/detections carrying eventId) ──────────────
+//
+// The event pages' LIVE data path. Locally they read dev-server preview
+// fixtures; in production those don't exist, and until this fetcher the pages
+// said "Nog geen data" over a fully harvested campaign. The rows come from
+// 78_upload_event.py via api_import_event and live in the same
+// posts/detections collections as everything else, marked with an eventId.
+//
+// Cached per eventId for the tab's lifetime: the Lowlands set is ~5K docs, and
+// the events LIST page and the event DETAIL page would otherwise each pay that
+// read bill on every visit.
+
+export type EventCampaign = { items: CampaignItem[]; detections: DetectionRow[] }
+
+const eventCampaignCache = new Map<string, Promise<EventCampaign>>()
+
+function mapEventPost(d: QueryDocumentSnapshot<DocumentData>): CampaignItem {
+  const x = d.data()
+  return {
+    itemId: (x.itemId as string) ?? d.id,
+    platform: (x.platform as CampaignItem['platform']) ?? 'instagram',
+    surface: (x.surface as CampaignItem['surface']) ?? 'post',
+    creatorHandle: (x.creatorHandle as string) ?? '',
+    platformHandle: (x.platformHandle as string | undefined) ?? undefined,
+    url: (x.url as string | null) ?? null,
+    coverUrl: (x.coverUrl as string | null) ?? null,
+    videoUrl: (x.videoUrl as string | null) ?? null,
+    mediaType: (x.mediaType as CampaignItem['mediaType']) ?? 'image',
+    postedAt: tsToIso(x.postedAt),
+    caption: (x.caption as string | null) ?? null,
+    hashtags: (x.hashtags as string[]) ?? [],
+    mentions: (x.mentions as string[]) ?? [],
+    videoDuration: (x.videoDuration as number | null) ?? null,
+    views: (x.viewsCount as number | null) ?? null,
+    likes: (x.likesCount as number | null) ?? null,
+    comments: (x.commentsCount as number | null) ?? null,
+    shares: (x.sharesCount as number | null) ?? null,
+    saves: (x.savesCount as number | null) ?? null,
+    pollVotes: (x.pollVotes as number | null) ?? null,
+    isPaidPartnership: x.isPaidPartnership === true,
+    foundVia: (x.foundVia as string | null) ?? null,
+    eventId: (x.eventId as string | null) ?? null,
+    scrapedFor: (x.scrapedFor as string | null) ?? null,
+    postKey: (x.postKey as string | null) ?? null,
+    slot: (x.slot as number | null) ?? null,
+    slots: (x.slots as number | null) ?? null,
+  }
+}
+
+export function fbFetchEventCampaign(eventId: string, brandId = BRAND_ID): Promise<EventCampaign> {
+  const cached = eventCampaignCache.get(eventId)
+  if (cached) return cached
+  const p = (async () => {
+    const [postSnap, detSnap] = await Promise.all([
+      getDocs(query(collection(fbDb, 'brands', brandId, 'posts'),
+        where('eventId', '==', eventId), fsLimit(8000))),
+      getDocs(query(collection(fbDb, 'brands', brandId, 'detections'),
+        where('eventId', '==', eventId), fsLimit(8000))),
+    ])
+    const items = postSnap.docs.map(mapEventPost)
+    const detections = detSnap.docs.map((d) => {
+      const row = mapDetection(d, brandId)
+      // The event join runs on the fixture-era item id, preserved as itemId on
+      // the doc; postId keeps the production shape for the live feed's
+      // parentPostKey collapse. Both name the same post.
+      const itemId = (d.data().itemId as string | null) ?? row.post_id
+      return { ...row, post_id: itemId }
+    })
+    return { items, detections }
+  })()
+  // A failed fetch must not be cached as "the event is empty".
+  p.catch(() => eventCampaignCache.delete(eventId))
+  eventCampaignCache.set(eventId, p)
+  return p
+}
+
+export async function fbFetchEventAudience(eventId: string, brandId = BRAND_ID): Promise<Audience | null> {
+  try {
+    const snap = await getDoc(doc(fbDb, 'brands', brandId, 'eventAudience', eventId))
+    if (!snap.exists()) return null
+    const data = { ...(snap.data() as Record<string, unknown>) }
+    delete data.importedAt
+    return data as unknown as Audience
+  } catch {
+    return null
+  }
 }

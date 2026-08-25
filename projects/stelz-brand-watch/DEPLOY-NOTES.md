@@ -175,3 +175,55 @@ is ever removed by other means.
 - **Subculture definitions are hand-curated for Stelz** (`lib/subcultures.py`).
   A second brand needs its own list; nothing in the matching logic is
   Stelz-aware, but the seed list is.
+
+---
+
+## 7. Live smoke test — bewijs dat een scan afrondt (~$0,25)
+
+Direct na elke functions-deploy, vóór iemand de grote knop indrukt. Wie: een
+**ingelogde brand-member** (uid onder `/brands/stelz/members/`); een
+niet-member krijgt 403 op elke stap.
+
+**Token halen**: log in op het gedeployde dashboard, DevTools → Application →
+IndexedDB → `firebaseLocalStorageDb` → het veld `idToken` van de ingelogde
+user. Geldig ~1 uur.
+
+```bash
+BASE=https://europe-west1-brand-audit-4b2cc.cloudfunctions.net
+
+curl -sX POST $BASE/api_step_hashtags -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"brandId":"stelz","perTag":10,"maxTags":2}'
+curl -sX POST $BASE/api_step_creators -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"brandId":"stelz","maxCreators":2,"postsPer":2}'
+curl -sX POST $BASE/api_step_stories -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"brandId":"stelz","maxHandles":5}'
+```
+
+Binnen ~3 minuten hoort in Firestore (`brands/stelz`, veld `scan`):
+`hashtagQueued == hashtagDone == 2`, `finishedAt` gezet, `endReason ==
+"tags_complete"`, `steps.hashtags/creators/stories` allemaal terminaal, en
+`detectionsCompleted` convergeert naar `detectTasksEnqueued` **zonder
+overschot** (alle drie de paden voeden nu de noemer). Dashboard: de pil gaat
+Scanning → "Scan afgerond"; geen enkele staprij blijft op running. Kosten
+≈ $0,25 op het usage-doc van vandaag.
+
+Daarna één volledige knop-scan: verwacht een `TRIMMED`-logregel in Cloud
+Logging als de standaard boven het resterend dagbudget projecteert, en een
+dagtotaal ≤ `dailyBudgetUsd`.
+
+## 8. Lowlands online zetten (eenmalig, na de functions-deploy)
+
+```bash
+# eerst zien wat er zou gaan (leest alleen lokale fixtures):
+./firebase/functions/venv/bin/python tools/stelz_brand_watch/78_upload_event.py \
+    --event lowlands-2026 --dry-run
+# dan echt, met een member-token (zie §7):
+./firebase/functions/venv/bin/python tools/stelz_brand_watch/78_upload_event.py \
+    --event lowlands-2026 --token "$TOKEN"
+```
+
+Idempotent: doc-ids zijn deterministisch en media is content-addressed —
+herdraaien na een verlopen token maakt niets dubbel. Controle daarna:
+`/evenementen/lowlands-2026` op de productie-URL toont dezelfde teller als
+`77_voortgang.py` lokaal, en het Publiek-tabblad rendert uit het
+`eventAudience`-doc.

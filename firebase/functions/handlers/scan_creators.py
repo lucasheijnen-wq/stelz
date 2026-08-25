@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from google.cloud import pubsub_v1
-from google.cloud.firestore import SERVER_TIMESTAMP
+from google.cloud.firestore import SERVER_TIMESTAMP, Increment
 
 from lib import apify, fs, usage
 
@@ -165,6 +165,17 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
         if publish_futures:
             from concurrent.futures import wait as _fwait
             _fwait(publish_futures, timeout=30)
+        # The scan panel's denominator. Only the hashtag path used to feed
+        # detectTasksEnqueued while the detect workers' bump_detect_progress
+        # counts completions from EVERY path — so completions overshot the
+        # denominator, the bar clamped to 100% and the phase left 'analysing'
+        # while this path's detections were still draining. Creators only runs
+        # via HTTP (the scheduler was removed), so unconditional is correct.
+        if images_enqueued + videos_enqueued > 0:
+            fs.brand_doc(brand_id).set({"scan": {
+                "detectTasksEnqueued": Increment(images_enqueued + videos_enqueued),
+                "lastActivityAt": SERVER_TIMESTAMP,
+            }}, merge=True)
 
     fs.scan_runs_col(brand_id).add({
         "type": "scan_creators",
@@ -203,6 +214,7 @@ def _persist_post(
     music: dict | None = None
     extras: dict | None = None
     follower_count: int | None = None
+    child_posts: list[dict] = []  # IG Sidecar children; empty everywhere else
 
     if platform == "instagram":
         ext_id = str(item.get("id") or item.get("shortCode") or "")
@@ -230,7 +242,8 @@ def _persist_post(
                 "original": bool(mi.get("isOriginal")),
             }
         # Carousel / single
-        images = item.get("childPosts") or []
+        child_posts = item.get("childPosts") or []
+        images = child_posts
         if not images and item.get("displayUrl"):
             images = [{"displayUrl": item.get("displayUrl")}]
         image_urls = [img.get("displayUrl") for img in images if img.get("displayUrl")]
@@ -315,6 +328,7 @@ def _persist_post(
         except Exception:
             posted_at = None
 
+    from .scan_hashtags import _tagged_users
     doc = {
         "creatorRef": creator_ref.path,
         "creatorHandle": handle,
@@ -324,6 +338,10 @@ def _persist_post(
         "caption": caption[:2000],
         "hashtags": [h.lower() for h in hashtags],
         "mentions": mentions,
+        # Who is tagged IN the media — expand_audience turns these into
+        # discovery candidates and graph edges. Same field the hashtag path
+        # writes, so a post carries it whichever route found it first.
+        "taggedUsers": _tagged_users(item),
         "postedAt": posted_at,
         "likesCount": likes,
         "commentsCount": comments,
@@ -364,13 +382,43 @@ def _persist_post(
     # Otherwise fall back to the cover image(s).
     if video_url:
         new_items.append((post_id, "video", video_url))
+
+    # IG carousels: one post doc PER SLIDE, fanned out under the CHILD
+    # composite id — the model the hashtag path has always used
+    # (scan_hashtags._persist_sidecar_child). This deep-scan used to fan every
+    # slide out under the PARENT id, so one slide found via both routes made
+    # TWO detection docs: instagram_{parent}_{child}_{hash} next to
+    # instagram_{parent}_{hash}. parentPostKey (first two id segments)
+    # collapses both on screen, but the double bookkeeping — and the second
+    # Gemini call when the two endpoints serve different bytes — stops here,
+    # at the source. A child the helper cannot key (no id, no media) falls
+    # back to the parent-keyed fan-out below so coverage never drops.
+    handled_child_urls: set[str] = set()
+    if child_posts:
+        from .scan_hashtags import _persist_sidecar_child
+        for child in child_posts:
+            c_id, c_kind, c_url, c_cover = _persist_sidecar_child(
+                brand_id, item, child, handle, posts_col)
+            if not c_id or not c_url:
+                continue
+            new_items.append((c_id, c_kind, c_url))
+            if c_cover:
+                new_items.append((c_id, "image", c_cover))
+            if child.get("displayUrl"):
+                handled_child_urls.add(child["displayUrl"])
+
     for idx, img_url in enumerate(image_urls):
         img_id = fs.composite_id(post_id, str(idx))
+        # The sequence view under the parent stays for every slide — it is how
+        # the post renders as one carousel — only the detect fan-out moves to
+        # the child ids.
         posts_col.document(post_id).collection("images").document(img_id).set({
             "url": img_url,
             "sequenceIdx": idx,
             "ingestedAt": SERVER_TIMESTAMP,
         }, merge=True)
+        if img_url in handled_child_urls:
+            continue
         # Always analyse the cover image, including for videos.
         #
         # This used to be skipped when video_url was set, to "avoid double work".

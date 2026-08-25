@@ -53,3 +53,10 @@ export function timeAgo(iso: string | null | undefined, now = Date.now()): strin
   if (days < 14) return `${days} d`
   return fmtDate(iso, new Date(now))
 }
+
+/** Follower counts are frequently absent — Instagram's hashtag scrape simply
+ *  does not return them. Rendering the absence as "0 followers" states
+ *  something false about the creator; omitting the line states nothing. */
+export function formatFollowers(n: number | null | undefined): string | null {
+  return n && n > 0 ? n.toLocaleString() : null
+}

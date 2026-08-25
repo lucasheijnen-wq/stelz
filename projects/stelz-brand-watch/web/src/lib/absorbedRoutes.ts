@@ -24,6 +24,19 @@ export type AbsorbedRoute = {
 
 export const ABSORBED_ROUTES: AbsorbedRoute[] = [
   { path: '/lowlands', to: '/evenementen/lowlands-2026' },
+  // /stories showed the same 348 stories the event page shows under its Stories
+  // tab, minus everything that makes them mean something: no period, so a story
+  // from July sat beside one from the festival, and no roster split, so a
+  // stranger's story and a booked creator's read identically. One screen for
+  // one surface is worth less than that surface inside the event it belongs to.
+  //
+  // ?preview=stories carries over, so the bookmark that opens the local fixture
+  // still opens it — it just lands on the tab now.
+  {
+    path: '/stories',
+    to: '/evenementen/lowlands-2026',
+    map: (p) => p.set('tab', 'stories'),
+  },
   {
     path: '/campagne',
     to: '/evenementen/lowlands-2026',

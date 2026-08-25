@@ -23,13 +23,17 @@ const PLACEMENT_TAG: Record<string, string> = {
 
 /** One piece of content as a tile: the image the model actually judged, what it
  *  concluded, and the one metric that surface publishes. */
-export function ContentCard({ row, onOpen, showTag }: {
+export function ContentCard({ row, onOpen, showTag, moreSlides }: {
   row: CampaignRow
   onOpen: () => void
   /** The hashtag that surfaced this, for discovery tiles. Without it the
    *  organic section is a list of strangers with no account of how they were
    *  found. */
   showTag?: boolean
+  /** Sightings of the same post folded into this card. The grid shows one card
+   *  per POST; a carousel with the can on eight slides is one card and this
+   *  badge, not eight near-identical tiles. */
+  moreSlides?: number
 }) {
   const metric = metricFor(row)
   return (
@@ -62,14 +66,23 @@ export function ContentCard({ row, onOpen, showTag }: {
         <span className="absolute top-1 right-1 text-[9px] px-1 py-0.5 bg-[var(--color-ink)]/70 text-white">
           {row.surface === 'tiktok' ? 'TT' : row.surface === 'story' ? 'ST' : 'IG'}
         </span>
-        {/* Which slide of a carousel, when there is more than one. Without it a
-            post appears several times with no explanation. */}
-        {row.slots != null && row.slots > 1 && (
+        {/* One card fronts the whole post: say how many more of its slides
+            carry the can, instead of drawing a near-identical tile for each. */}
+        {moreSlides != null && moreSlides > 0 ? (
+          <span
+            title={`Stëlz staat ook op ${moreSlides} andere dia${moreSlides === 1 ? '' : "'s"} van deze post`}
+            className="absolute bottom-1 left-1 text-[9px] px-1 py-0.5 bg-[var(--color-ink)]/70 text-white tabular-nums"
+          >
+            +{moreSlides} dia{moreSlides === 1 ? '' : "'s"}
+          </span>
+        ) : row.slots != null && row.slots > 1 ? (
+          // Which slide of a carousel, when only one of its slides is shown.
           <span className="absolute bottom-1 left-1 text-[9px] px-1 py-0.5 bg-[var(--color-ink)]/70 text-white tabular-nums">
             {(row.slot ?? 0) + 1}/{row.slots}
           </span>
-        )}
-        {(row.slots == null || row.slots <= 1) && row.framesJudged > 1 && (
+        ) : null}
+        {(row.slots == null || row.slots <= 1) && !(moreSlides != null && moreSlides > 0)
+          && row.framesJudged > 1 && (
           <span className="absolute bottom-1 left-1 text-[9px] px-1 py-0.5 bg-[var(--color-ink)]/70 text-white tabular-nums">
             {row.framesJudged} beelden
           </span>

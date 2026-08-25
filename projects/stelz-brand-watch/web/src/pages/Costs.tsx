@@ -24,8 +24,7 @@ import {
   recipes, projection, fmtUsd, spendBreakdown,
 } from '../lib/costs'
 import { fmtNum, fmtDate } from '../lib/format'
-import { useMembership } from '../lib/membership'
-
+import { useMembership } from '../lib/membershipContext'
 const DAYS = 14
 
 export default function Costs() {
@@ -37,7 +36,10 @@ export default function Costs() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!canWrite) { setLoading(false); return }
+    // No write access means nothing to fetch. Nothing to clear either: the
+    // admin-only card below never reads `loading`, so the setLoading(false)
+    // that used to sit here only existed to make a spinner nobody sees stop.
+    if (!canWrite) return
     let cancelled = false
     void Promise.all([
       fbListUsage(DAYS),
@@ -58,23 +60,6 @@ export default function Costs() {
     ).length,
     [profiles],
   )
-
-  if (!canWrite) {
-    return (
-      <PageShell title="Kosten">
-        <Card className="p-12 text-center text-[13px] text-[var(--color-ink-muted)]">
-          Deze pagina is alleen voor beheerders.
-        </Card>
-      </PageShell>
-    )
-  }
-
-  const budget = brand?.dailyBudgetUsd ?? 5
-  const today = usage[0]
-  const spendToday = today?.estimatedSpendUsd ?? 0
-  const rung = degradeLevel(spendToday, budget)
-  const total = usage.reduce((s, d) => s + d.estimatedSpendUsd, 0)
-  const proj = projection(trackedHandles, brand?.storiesAutoScan === true)
 
   // Totals per unit over the window, so the biggest cost driver is obvious.
   const totals = useMemo(() => {
@@ -100,6 +85,29 @@ export default function Costs() {
     }
     return { id: 'spend', label: 'Uitgaven', tone: 'accent', data }
   }, [usage])
+
+  // EVERY HOOK IS ABOVE THIS LINE, and it has to stay that way. This return
+  // used to sit above the two useMemos: the moment `canWrite` flipped from
+  // false to true — which is exactly what happens when membership resolves a
+  // moment after first paint — React saw two extra hooks appear and threw
+  // "Rendered more hooks than during the previous render", taking the page out
+  // rather than showing the numbers it had just loaded.
+  if (!canWrite) {
+    return (
+      <PageShell title="Kosten">
+        <Card className="p-12 text-center text-[13px] text-[var(--color-ink-muted)]">
+          Deze pagina is alleen voor beheerders.
+        </Card>
+      </PageShell>
+    )
+  }
+
+  const budget = brand?.dailyBudgetUsd ?? 5
+  const today = usage[0]
+  const spendToday = today?.estimatedSpendUsd ?? 0
+  const rung = degradeLevel(spendToday, budget)
+  const total = usage.reduce((s, d) => s + d.estimatedSpendUsd, 0)
+  const proj = projection(trackedHandles, brand?.storiesAutoScan === true)
 
   return (
     <PageShell

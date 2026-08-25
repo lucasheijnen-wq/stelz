@@ -173,6 +173,15 @@ class StoriesBase(unittest.TestCase):
     def run_stories(self, **kw):
         return scan_stories.run("stelz", dry_run=True, **kw)
 
+    def brand_scan_writes(self) -> list[dict]:
+        """Every `scan` map written to the brand doc, in call order."""
+        out = []
+        for call in self.brand.set.call_args_list:
+            payload = call.args[0] if call.args else {}
+            if isinstance(payload, dict) and "scan" in payload:
+                out.append(payload["scan"])
+        return out
+
     def stamp(self) -> dict:
         """The `stories` map last written to the brand doc, or {}."""
         for call in reversed(self.brand.set.call_args_list):
@@ -620,6 +629,44 @@ class TestLastRunStamp(StoriesBase):
         self.apify.run_sync.return_value = [STORY]
         out = self.run_stories()
         self.assertEqual(out["storiesFound"], 1)
+
+
+class TestSessionCounters(StoriesBase):
+    """The scan panel's denominator, from the stories path.
+
+    Only the HTTP step a person started may bump scan.detectTasksEnqueued —
+    the 6-hourly scheduler leaves the panel alone (that is the whole reason
+    the stories stamp lives in its own `stories` block on the brand doc)."""
+
+    class _Publisher:
+        def topic_path(self, project, topic):
+            return f"{project}/{topic}"
+
+        def publish(self, topic, payload):
+            from concurrent.futures import Future
+            f = Future()
+            f.set_result("id")
+            return f
+
+    def _run_live(self, **kw):
+        self.apify.run_sync.return_value = [STORY]
+        with mock.patch.object(scan_stories, "pubsub_v1", types.SimpleNamespace(
+            PublisherClient=lambda: self._Publisher()),
+        ), mock.patch.object(scan_stories, "Increment", lambda n: ("INC", n)):
+            return scan_stories.run("stelz", dry_run=False, **kw)
+
+    def test_http_step_bumps_the_denominator(self):
+        out = self._run_live(session_counters=True)
+        self.assertEqual(out["imagesEnqueued"], 1)
+        bumps = [s["detectTasksEnqueued"] for s in self.brand_scan_writes()
+                 if "detectTasksEnqueued" in s]
+        self.assertEqual(bumps, [("INC", 1)])
+
+    def test_scheduled_sweep_leaves_the_panel_alone(self):
+        out = self._run_live()  # session_counters defaults to False
+        self.assertEqual(out["imagesEnqueued"], 1)
+        self.assertEqual([s for s in self.brand_scan_writes()
+                          if "detectTasksEnqueued" in s], [])
 
 
 if __name__ == "__main__":

@@ -48,6 +48,8 @@ if not firebase_admin._apps:
 from handlers import (
     analyze_sentiment,
     bootstrap_brand,
+    expand_audience,
+    import_event,
     projects,
     refresh_profiles,
     seed_subcultures,
@@ -98,6 +100,46 @@ def scheduled_stories(event: scheduler_fn.ScheduledEvent) -> None:
             log.info(f"[{snap.id}] scheduled stories: {out}")
         except Exception:
             log.exception(f"scheduled_stories failed for {snap.id}")
+
+
+# The daily scan is the answer to "show me everything posted with the brand
+# TODAY": click-driven scanning covers whatever day someone remembered to
+# click. Same fences as scheduled_stories — opt-in per brand (dailyAutoScan,
+# absent = off), publish_tags sizes itself to the remaining daily budget
+# before committing a dollar, and every handler re-checks the budget ladder.
+# 07:00 Amsterdam: yesterday evening's posts are up, the budget day is fresh.
+# It does not touch brand.scan.steps beyond what the handlers already write —
+# but hashtags DOES reset the scan session block, which is correct here: an
+# unattended morning scan is a real scan, and its progress should be what the
+# dashboard shows when someone opens it over coffee.
+@scheduler_fn.on_schedule(
+    schedule="every day 07:00",
+    timezone=scheduler_fn.Timezone("Europe/Amsterdam"),
+    region="europe-west1",
+    memory=options.MemoryOption.GB_1,
+    timeout_sec=540,
+)
+def scheduled_daily_scan(event: scheduler_fn.ScheduledEvent) -> None:
+    for snap in fs.brands_col().stream():
+        if (snap.to_dict() or {}).get("dailyAutoScan") is not True:
+            continue
+        bid = snap.id
+        # Same order as the dashboard button; each step guards its own budget.
+        # Failures are logged per step so one broken step never silences the
+        # rest — the exact lesson the button's await-chain taught.
+        for name, step in (
+            ("hashtags", lambda: scan_hashtags.publish_tags(bid, per_tag=150, max_tags=30)),
+            ("creators", lambda: scan_creators.run(bid, max_creators=80, posts_per=8)),
+            ("profiles", lambda: refresh_profiles.run(bid)),
+            ("subcultures", lambda: seed_subcultures.run(bid)),
+            ("audience", lambda: expand_audience.run(bid)),
+            ("srs", lambda: compute_resonance.run(bid)),
+        ):
+            try:
+                out = step()
+                log.info(f"[{bid}] daily {name}: {out}")
+            except Exception:
+                log.exception(f"scheduled_daily_scan {name} failed for {bid}")
 
 
 # ─────────────────── PUB/SUB ───────────────────
@@ -346,6 +388,10 @@ def api_step_stories(req: https_fn.Request) -> https_fn.Response:
     return _run_step(req, lambda brand_id, body: scan_stories.run(
         brand_id,
         max_handles=int(body.get("maxHandles") or scan_stories.DEFAULT_MAX_HANDLES),
+        # A person started this session from the dashboard, so its fan-out
+        # belongs in the scan panel's denominator. The 6-hourly scheduler
+        # deliberately leaves this off.
+        session_counters=True,
     ), step="stories")
 
 
@@ -378,6 +424,31 @@ def api_step_subcultures(req: https_fn.Request) -> https_fn.Response:
     no Gemini, no Apify, so it is free to re-run.
     """
     return _run_step(req, lambda brand_id, body: seed_subcultures.run(brand_id), step="subcultures")
+
+
+@https_fn.on_request(cors=CORS_POST, memory=options.MemoryOption.MB_512, timeout_sec=300)
+def api_step_audience(req: https_fn.Request) -> https_fn.Response:
+    """Turn the people AROUND recent hits into discovery candidates and edges.
+
+    Reads data already in Firestore (tagged users and mentions on hit posts):
+    no Gemini, no Apify, free to re-run. Must run BEFORE api_step_srs — the
+    edges this writes are the graph layer SRS reads, which was consuming 30%
+    of the hot-mode weight while nothing wrote the collection.
+    """
+    return _run_step(req, lambda brand_id, body: expand_audience.run(
+        brand_id,
+        max_hits=int(body.get("maxHits") or expand_audience.DEFAULT_MAX_HITS),
+    ), step="audience")
+
+
+@https_fn.on_request(cors=CORS_POST, memory=options.MemoryOption.GB_1, timeout_sec=300)
+def api_import_event(req: https_fn.Request) -> https_fn.Response:
+    """Import locally harvested event rows/media — see handlers/import_event.
+
+    Member-gated like every write. No `step`: an import is not a scan session
+    and must not repaint the scan panel.
+    """
+    return _run_step(req, lambda brand_id, body: import_event.run(brand_id, body))
 
 
 @https_fn.on_request(cors=CORS_POST, memory=options.MemoryOption.MB_512, timeout_sec=540)
@@ -440,6 +511,7 @@ _BRAND_EDITABLE_FIELDS = {
     "embeddingThreshold",  # float, embedding pre-filter cosine
     "dailyBudgetUsd",      # float, budget guard ceiling
     "storiesAutoScan",     # bool, kill switch for the 6-hourly stories scan
+    "dailyAutoScan",       # bool, kill switch for the 07:00 daily scan
 }
 
 

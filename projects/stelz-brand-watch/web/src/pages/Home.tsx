@@ -3,14 +3,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import {
-  PageShell, Card, Badge, Button, Img, Avatar, Input, Tabs, formatFollowers, PRODUCT_LINE_LABEL,
-  CARD_GRID, HAIRLINE_GRID,
-} from '../components/ui'
+import { PageShell, Card, Badge, Button, Img, Avatar, Input, Tabs, CARD_GRID, HAIRLINE_GRID } from '../components/ui'
+import { PRODUCT_LINE_LABEL } from '../lib/labels'
+import { formatFollowers } from '../lib/format'
 import { MediaTile } from '../components/MediaTile'
-import { Sparkline, LineChart, BarChart, Donut, StackedDayBars, bucketByDay, type Series } from '../components/Chart'
+import { Sparkline, LineChart, BarChart, Donut, StackedDayBars, type Series } from '../components/Chart'
+import { bucketByDay } from '../lib/buckets'
 import { DetectionDrawer } from '../components/DetectionDrawer'
 import { ScanPanel } from '../components/ScanPanel'
+import { scanIsStale } from '../lib/scanProgress'
 import { StoriesStrip } from '../components/StoriesStrip'
 import {
   fetchDetections, fetchTopResonance, fetchCreatorSubcultures, fetchSubcultures,
@@ -27,9 +28,11 @@ import { communityProfiles, oneLineSummary, DAY_NAMES, type CommunityProfile } f
 import { detectionsCsv, communitiesCsv, downloadCsv, datedFilename } from '../lib/csv'
 import { verifyDetection, sortByEvidence } from '../lib/verify'
 import { tallySounds, soundHref } from '../lib/sounds'
+import { useNow } from '../lib/useNow'
+import { useResetOn } from '../lib/useResetOn'
 import {
   fbBootstrapBrand, fbStepHashtags, fbStepCreators, fbStepSrs, fbStepSentiment,
-  fbStepSubcultures, fbStepProfiles,
+  fbStepSubcultures, fbStepProfiles, fbStepAudience,
   fbFetchPipelineCounts, fbSubscribeScanState, fbStepStories,
   fbSubscribeStoriesState, fbFetchStories, fbFetchStoryPosts,
   fbListUsage, fbGetBrand,
@@ -39,7 +42,8 @@ import { degradeLevel, DEGRADE_LABEL, fmtUsd, UNIT_META } from '../lib/costs'
 import {
   pickWorthALook, biggestFanToday, detectSpike, countNewSince,
 } from '../lib/score'
-import { useMembership, ReadOnlyNotice } from '../lib/membership'
+import { ReadOnlyNotice } from '../lib/membership'
+import { useMembership } from '../lib/membershipContext'
 import { useStoryPostsPreview, useStoryPreview } from '../lib/devPreview'
 import { joinStories, storySource, type StoryRow } from '../lib/storyStats'
 import { StoryDetail } from '../components/StoryDetail'
@@ -100,7 +104,11 @@ export default function Home() {
   const [detections, setDetections] = useState<DetectionRow[]>(() => loadCache()?.detections ?? [])
   const [resonance, setResonance] = useState<ResonanceRow[]>(() => loadCache()?.resonance ?? [])
   const [counts, setCounts] = useState<PipelineCounts | null>(() => loadCache()?.counts ?? null)
-  const [refreshing, setRefreshing] = useState(false)
+  // Starts TRUE: the mount effect below begins a fetch straight away, so the
+  // first paint should already say a fetch is running. It also used to mean
+  // `loading` was false for one frame on a cold start, which rendered the
+  // dashboard's empty state — "no hits" — a beat before the data arrived.
+  const [refreshing, setRefreshing] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const hasCache = detections.length > 0 || !!counts
@@ -127,8 +135,22 @@ export default function Home() {
   const [storyPosts, setStoryPosts] = useState<StoryPost[] | null>(null)
   const [storyDetections, setStoryDetections] = useState<DetectionRow[]>([])
 
-  const refreshData = useCallback(async () => {
-    setRefreshing(true)
+  // THE FETCH LIVES IN THE EFFECT, and everyone who wants a fresh one bumps
+  // `reloadKey`. It used to be a useCallback the mount effect invoked, which is
+  // the shape react-hooks/set-state-in-effect exists to catch: the effect body
+  // reached a setState synchronously.
+  //
+  // The rewrite brings CANCELLATION, which the callback version had none of.
+  // Five parallel Firestore reads land whenever they land, and nothing told an
+  // in-flight batch that a newer one had started — so an unmounted dashboard
+  // still called setState, and two overlapping refreshes could resolve out of
+  // order and leave the older answer on screen.
+  const [reloadKey, setReloadKey] = useState(0)
+  const refreshData = () => { setRefreshing(true); setReloadKey((k) => k + 1) }
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
     try {
       const [d, r, c, s, sp] = await Promise.all([
         fetchDetections({ limit: DETECTION_FETCH_LIMIT }).catch(() => [] as DetectionRow[]),
@@ -137,6 +159,7 @@ export default function Home() {
         fbFetchStories(2000).catch(() => [] as DetectionRow[]),
         fbFetchStoryPosts(2000).catch(() => null),
       ])
+      if (cancelled) return
       setDetections(d)
       setResonance(r)
       setCounts(c)
@@ -146,13 +169,13 @@ export default function Home() {
       setStoryPosts(sp)
       saveCache({ savedAt: Date.now(), detections: d, resonance: r, counts: c })
     } catch (e) {
-      setError((e as Error).message)
+      if (!cancelled) setError((e as Error).message)
     } finally {
-      setRefreshing(false)
+      if (!cancelled) setRefreshing(false)
     }
-  }, [])
-
-  useEffect(() => { void refreshData() }, [refreshData])
+    })()
+    return () => { cancelled = true }
+  }, [reloadKey])
 
   useEffect(() => {
     let cancelled = false
@@ -178,9 +201,11 @@ export default function Home() {
   useEffect(() => {
     const unsub = fbSubscribeScanState((s) => {
       setScanState(s)
-      const started = s?.startedAt ? new Date(s.startedAt).getTime() : 0
       const finished = s?.finishedAt ? new Date(s.finishedAt).getTime() : 0
-      const running = !!started && !finished
+      // Stale-gated: a scan that died weeks ago otherwise reads as "running"
+      // here and keeps this page re-fetching Firestore every 25 seconds for
+      // as long as it is open.
+      const running = !!s?.startedAt && !finished && !scanIsStale(s)
       const recentlyDone = !!finished && (Date.now() - finished) < 3 * 60_000
       setScanActive(running || recentlyDone)
     })
@@ -188,9 +213,9 @@ export default function Home() {
   }, [])
   useEffect(() => {
     if (!scanActive) return
-    const id = window.setInterval(() => { void refreshData() }, 25_000)
+    const id = window.setInterval(refreshData, 25_000)
     return () => window.clearInterval(id)
-  }, [scanActive, refreshData])
+  }, [scanActive])
 
   // Stories run on their own 6-hourly schedule, outside any scan session, so
   // their last-run stamp is a separate subscription rather than a scan step.
@@ -217,14 +242,14 @@ export default function Home() {
       // The sweep only writes posts; the detections the strip renders arrive
       // via the detect fan-out a beat later, so refresh again after a pause
       // rather than leaving an empty strip behind a finished button.
-      await refreshData()
-      window.setTimeout(() => { void refreshData() }, 20_000)
+      refreshData()
+      window.setTimeout(refreshData, 20_000)
     } catch (e) {
       setStoriesError((e as Error).message)
     } finally {
       setStoriesFetching(false)
     }
-  }, [refreshData])
+  }, [])
 
   const days = DAYS_WINDOW
   // Collapse frame-level AND carousel-slot detections into one row per real
@@ -665,7 +690,22 @@ function FeedTab({ rows, allDetections, truncated, lastSeenAt, onOpen }: { rows:
   }, [rows, view, search, productFilter, tierFilter, trustFilter, platformFilter, typeFilter, angleFilter, minConfidence])
 
   // Reset pagination when any filter narrows/changes the result set.
-  useEffect(() => { setVisibleCount(60) }, [view, search, productFilter, tierFilter, trustFilter, platformFilter, typeFilter, angleFilter, minConfidence])
+  //
+  // During render, not in an effect: as an effect the newly-filtered list first
+  // painted at whatever count the previous filter had been scrolled to — so
+  // narrowing a filter after "load more" briefly showed a longer list than the
+  // filter allows, then snapped back. Folded into one string because useResetOn
+  // compares a single value with Object.is, and every part here is a primitive.
+  //
+  // JSON.stringify rather than join(): `search` is free text, so a separator
+  // that can occur inside a value makes different filter sets collide — search
+  // "a b" with view "c" would produce the same key as search "a" with view
+  // "b c", and the reset would not fire.
+  useResetOn(
+    JSON.stringify([view, search, productFilter, tierFilter, trustFilter,
+                    platformFilter, typeFilter, angleFilter, minConfidence]),
+    () => setVisibleCount(60),
+  )
 
   // Rejected in this session. The write goes to Firestore via rateDetection,
   // but the refetch is on a timer, so the card is pulled optimistically and
@@ -1453,7 +1493,7 @@ function CreatorsTab({ detections, resonance, creatorProfiles }: {
       return (b.lastSeen ?? '').localeCompare(a.lastSeen ?? '')
     })
     return out
-  }, [detections, search, platformFilter, sort])
+  }, [detections, search, platformFilter, sort, followersByHandle])
 
   return (
     <div className="space-y-5">
@@ -1584,9 +1624,15 @@ function DashboardSection({ detections, rangeRows, days, creatorScenes, sceneLab
   creatorProfiles: Record<string, { followerCount: number | null; bio: string | null; avatarUrl: string | null }>
   onGotoTab?: (t: Tab) => void
 }) {
+  // One clock for the whole section, so the "last 7 days" cutoff and the
+  // half-window split below cannot land on different moments within one render.
+  // Five minutes: every value here is day- or half-window-granular, and each
+  // tick re-runs the filters over every row.
+  const now = useNow(5 * 60_000)
+
   // ── Top-row KPIs ────────────────────────────────────────────────
   const totalHits = rangeRows.filter((d) => d.detected === true).length
-  const week = new Date(); week.setDate(week.getDate() - 7)
+  const week = new Date(now); week.setDate(week.getDate() - 7)
   const weekIso = week.toISOString()
   const thisWeekHits = rangeRows.filter((d) => d.detected && (d.posted_at ?? '') >= weekIso).length
   const activeCreators = new Set(rangeRows.filter((d) => d.detected).map((d) => d.creator_handle)).size
@@ -1631,7 +1677,7 @@ function DashboardSection({ detections, rangeRows, days, creatorScenes, sceneLab
 
   // ── 3. Creator leaderboard (hits + growth + identity in one) ─────
   const halfMs = (days * 24 * 60 * 60 * 1000) / 2
-  const cutoff = Date.now() - halfMs
+  const cutoff = now - halfMs
   const perCreator = new Map<string, {
     recent: number; prior: number; total: number
     avatar: string | null; platform: string; firstImage: string | null
@@ -2505,10 +2551,18 @@ function RunScanButton({ onComplete, liveHits, onStepErrors }: {
   // forever.
   const queued = state?.hashtagQueued ?? 0
   const done = state?.hashtagDone ?? 0
-  const now = Date.now()
-  const lastActMs = state?.lastActivityAt ? new Date(state.lastActivityAt).getTime() : 0
-  const staleMs = now - lastActMs
-  const isStale = !!state?.startedAt && !state.finishedAt && staleMs > 5 * 60_000
+  // TICKING, not read once. The stale test asks whether five minutes have
+  // passed with no write — a condition that becomes true precisely while
+  // nothing on the page is changing. Read during render it only fired if the
+  // user happened to click something, so the panel could sit on "18/19"
+  // indefinitely, which is the exact failure this check exists to catch.
+  //
+  // The judgement itself lives in lib/scanProgress.scanIsStale, shared with
+  // the panel. This button used to roll its own with `lastActivityAt ?? 0`,
+  // which called a scan stalled in the second between startedAt landing and
+  // the first heartbeat — a freshly clicked scan flashed "Stalled at 0/0".
+  const now = useNow(15_000)
+  const isStale = scanIsStale(state, now)
   const running = !!state?.startedAt && !state.finishedAt && !isStale
   const progressPct = queued > 0 ? Math.round((done / queued) * 100) : 0
 
@@ -2524,7 +2578,7 @@ function RunScanButton({ onComplete, liveHits, onStepErrors }: {
     setClicking(true); setError(null)
     try {
       await fbBootstrapBrand()
-      await fbStepHashtags(500, 50)
+      await fbStepHashtags()
       // creators + SRS still run in the background — fire-and-forget without
       // blocking the pill. Failures surface as `error` on brand.scan later.
       // Subcultures must land before SRS — the subculture layer reads the
@@ -2540,6 +2594,10 @@ function RunScanButton({ onComplete, liveHits, onStepErrors }: {
         .catch((e) => onStepError('creators', e))
         .then(() => fbStepProfiles().catch((e) => onStepError('profiles', e)))
         .then(() => fbStepSubcultures().catch((e) => onStepError('subcultures', e)))
+        // Audience before SRS: the edges it writes are the graph layer SRS
+        // reads — 30% of the hot-mode weight that scored 0 while nothing
+        // wrote that collection.
+        .then(() => fbStepAudience().catch((e) => onStepError('audience', e)))
         .then(() => fbStepSrs().catch((e) => onStepError('srs', e)))
       // Sentiment scores whatever is unscored, this scan's hits included on the
       // next run. Batched and capped, so a large backlog drains over several
@@ -2556,8 +2614,10 @@ function RunScanButton({ onComplete, liveHits, onStepErrors }: {
   const startedAgo = state?.startedAt ? timeAgo(state.startedAt) : null
   const finishedAgo = state?.finishedAt ? timeAgo(state.finishedAt) : null
   // Old scan info shouldn't linger forever — hide the pill 6h after finish.
+  // Same ticking clock as the stale test above, so the two cannot disagree
+  // about what time it is within one render.
   const finishedRecently = !!state?.finishedAt &&
-    (Date.now() - new Date(state.finishedAt).getTime()) < 6 * 3600_000
+    (now - new Date(state.finishedAt).getTime()) < 6 * 3600_000
   // Display hits = the same deduped post-level count the dashboard shows.
   // scan.detectionsHit counts every frame doc and reads inflated.
   const displayHits = liveHits ?? state?.detectionsHit ?? 0
@@ -2598,7 +2658,11 @@ function RunScanButton({ onComplete, liveHits, onStepErrors }: {
               <span className="tabular-nums text-[var(--color-ink-muted)]">
                 · {(state?.postsWritten ?? 0).toLocaleString()} posts
               </span>
-              <span className="text-[var(--color-ink-subtle)]">· no activity {timeAgo(state!.lastActivityAt!)}</span>
+              {/* A scan can stall before its first heartbeat ever lands; then
+                  there is no lastActivityAt to date the silence with. */}
+              <span className="text-[var(--color-ink-subtle)]">
+                · no activity {state?.lastActivityAt ? timeAgo(state.lastActivityAt) : 'since start'}
+              </span>
             </>
           ) : running ? (
             <>

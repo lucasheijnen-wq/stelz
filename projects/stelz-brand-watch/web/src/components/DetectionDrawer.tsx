@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Badge, Button, Img, formatFollowers, PRODUCT_LINE_LABEL } from './ui'
+import { Badge, Button, Img } from './ui'
+import { PRODUCT_LINE_LABEL } from '../lib/labels'
+import { formatFollowers } from '../lib/format'
 import { MediaTile } from './MediaTile'
 import { imageUrlFor, loadState, toggleShortlist, toggleHidden, type DetectionRow } from '../lib/data'
 import { isBrandTag } from '../lib/signal'
 import { detectionQuality } from '../lib/quality'
 import { AddToProject } from './AddToProject'
 import { verifyDetection } from '../lib/verify'
+import { useResetOn } from '../lib/useResetOn'
 
 export function DetectionDrawer({
   detection,
@@ -32,8 +35,9 @@ export function DetectionDrawer({
     return () => window.removeEventListener('keydown', onKey)
   }, [detection, onClose])
 
-  // Reset frame selection when a different detection opens.
-  useEffect(() => { setActiveFrame(null) }, [detection?.detection_id])
+  // Reset frame selection when a different detection opens. During render, so
+  // the new detection never paints with the previous one's frame selected.
+  useResetOn(detection?.detection_id, () => setActiveFrame(null))
 
   if (!detection) return null
   const d = detection

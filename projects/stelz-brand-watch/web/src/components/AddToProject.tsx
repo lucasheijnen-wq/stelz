@@ -13,8 +13,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button } from './ui'
 import { fetchProjects, projectsAction, type Project } from '../lib/data'
-import { useMembership } from '../lib/membership'
-
+import { useMembership } from '../lib/membershipContext'
 export function AddToProject({ creatorId, label = 'Track in project' }: { creatorId: string; label?: string }) {
   const { canWrite } = useMembership()
   const [open, setOpen] = useState(false)
