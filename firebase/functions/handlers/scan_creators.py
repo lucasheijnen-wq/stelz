@@ -328,6 +328,7 @@ def _persist_post(
         except Exception:
             posted_at = None
 
+    from .scan_hashtags import _tagged_users
     doc = {
         "creatorRef": creator_ref.path,
         "creatorHandle": handle,
@@ -337,6 +338,10 @@ def _persist_post(
         "caption": caption[:2000],
         "hashtags": [h.lower() for h in hashtags],
         "mentions": mentions,
+        # Who is tagged IN the media — expand_audience turns these into
+        # discovery candidates and graph edges. Same field the hashtag path
+        # writes, so a post carries it whichever route found it first.
+        "taggedUsers": _tagged_users(item),
         "postedAt": posted_at,
         "likesCount": likes,
         "commentsCount": comments,

@@ -119,5 +119,32 @@ class TestSeedIntegrity(unittest.TestCase):
             )
 
 
+class TestWidenedCircles(unittest.TestCase):
+    """The 2026-08 widening: measured circle names from the repo's own dormant
+    seed lists (04_discover_lifestyle, the 13-creator seed), grafted onto the
+    EXISTING ten scenes rather than added as new ones — taxonomy stays stable,
+    the nets get wider. These pin that the graft actually lands somewhere."""
+
+    def _slugs(self, tags):
+        return [m["slug"] for m in sc.match_creator(tags)]
+
+    def test_vriendengroep_circle_lands_in_house_parties(self):
+        self.assertIn("house_parties", self._slugs(["ladiesnight", "meidenavond"]))
+
+    def test_werkborrel_circle_lands_in_vrijmibo(self):
+        self.assertIn("vrijmibo", self._slugs(["werkborrel", "afterwork"]))
+
+    def test_uitgaansleven_lands_in_nightlife(self):
+        self.assertIn("horeca_nightlife", self._slugs(["uitgaansleven", "nachtleven"]))
+
+    def test_introweek_lands_in_student_life(self):
+        self.assertIn("student_life", self._slugs(["introweek", "studentenstad"]))
+
+    def test_one_new_tag_alone_still_does_not_place_anyone(self):
+        # MIN_CONFIDENCE requires a second signal; widening the nets must not
+        # have weakened the guard the whole taxonomy rests on.
+        self.assertEqual(sc.match_creator(["ladiesnight"]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

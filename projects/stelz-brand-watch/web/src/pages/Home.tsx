@@ -32,7 +32,7 @@ import { useNow } from '../lib/useNow'
 import { useResetOn } from '../lib/useResetOn'
 import {
   fbBootstrapBrand, fbStepHashtags, fbStepCreators, fbStepSrs, fbStepSentiment,
-  fbStepSubcultures, fbStepProfiles,
+  fbStepSubcultures, fbStepProfiles, fbStepAudience,
   fbFetchPipelineCounts, fbSubscribeScanState, fbStepStories,
   fbSubscribeStoriesState, fbFetchStories, fbFetchStoryPosts,
   fbListUsage, fbGetBrand,
@@ -2594,6 +2594,10 @@ function RunScanButton({ onComplete, liveHits, onStepErrors }: {
         .catch((e) => onStepError('creators', e))
         .then(() => fbStepProfiles().catch((e) => onStepError('profiles', e)))
         .then(() => fbStepSubcultures().catch((e) => onStepError('subcultures', e)))
+        // Audience before SRS: the edges it writes are the graph layer SRS
+        // reads — 30% of the hot-mode weight that scored 0 while nothing
+        // wrote that collection.
+        .then(() => fbStepAudience().catch((e) => onStepError('audience', e)))
         .then(() => fbStepSrs().catch((e) => onStepError('srs', e)))
       // Sentiment scores whatever is unscored, this scan's hits included on the
       // next run. Batched and capped, so a large backlog drains over several

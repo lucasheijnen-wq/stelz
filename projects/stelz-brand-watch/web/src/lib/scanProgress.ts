@@ -33,6 +33,9 @@ export const STEP_ORDER: { key: StepId; label: string }[] = [
   { key: ANALYSIS_KEY, label: 'Beelden analyseren' },
   { key: 'profiles', label: 'Profielen verversen' },
   { key: 'subcultures', label: 'Scenes indelen' },
+  // Before SRS in display as in execution: the edges this writes are the
+  // graph layer SRS reads.
+  { key: 'audience', label: 'Publiek uitbreiden' },
   { key: 'srs', label: 'Resonantie berekenen' },
   { key: 'sentiment', label: 'Sentiment scoren' },
 ]

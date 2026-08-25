@@ -1033,6 +1033,7 @@ function AdvancedSection() {
   const [confidenceMin, setConfidenceMin] = useState(0.7)
   const [dailyBudget, setDailyBudget] = useState(5)
   const [storiesAutoScan, setStoriesAutoScan] = useState(false)
+  const [dailyAutoScan, setDailyAutoScan] = useState(false)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -1043,6 +1044,7 @@ function AdvancedSection() {
       if (typeof b.confidenceMin === 'number') setConfidenceMin(b.confidenceMin)
       if (typeof b.dailyBudgetUsd === 'number') setDailyBudget(b.dailyBudgetUsd)
       setStoriesAutoScan(b.storiesAutoScan === true)
+      setDailyAutoScan(b.dailyAutoScan === true)
     })
   }, [])
 
@@ -1053,6 +1055,7 @@ function AdvancedSection() {
         confidenceMin,
         dailyBudgetUsd: dailyBudget,
         storiesAutoScan,
+        dailyAutoScan,
       })
       setMsg('Saved')
       setTimeout(() => setMsg(null), 2500)
@@ -1091,6 +1094,21 @@ function AdvancedSection() {
                 onChange={(e) => setStoriesAutoScan(e.target.checked)}
               />
               <span>{storiesAutoScan ? 'Aan — elke 6 uur' : 'Uit'}</span>
+            </label>
+          </Field>
+
+          <Field
+            label="Dagelijkse scan"
+            hint="Elke ochtend om 07:00 een volledige scan: hashtags, creators, profielen, scenes en resonantie. De scan maakt zichzelf passend binnen het resterende dagbudget voordat er iets wordt uitgegeven — de limiet hieronder is dus ook hier de baas."
+          >
+            <label className="flex items-center gap-2 text-[13px]">
+              <input
+                type="checkbox"
+                checked={dailyAutoScan}
+                disabled={!canWrite}
+                onChange={(e) => setDailyAutoScan(e.target.checked)}
+              />
+              <span>{dailyAutoScan ? 'Aan — elke ochtend 07:00' : 'Uit'}</span>
             </label>
           </Field>
 

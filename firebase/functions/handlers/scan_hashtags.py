@@ -54,6 +54,24 @@ def _tiktok_music_url(music_id: str | None, music_name: str | None) -> str | Non
     slug = _slugify(music_name or "original-sound")
     return f"https://www.tiktok.com/music/{slug}-{music_id}"
 
+
+def _tagged_users(item: dict) -> list[str]:
+    """Who is tagged IN the media, normalised to bare handles.
+
+    Instagram sends `taggedUsers: [{username}]`, TikTok `detailedMentions`
+    (dicts or strings depending on actor version). Stored on the post doc
+    because expand_audience reads it back: a person tagged in a photo of the
+    can was AT the party — the warmest discovery signal the data holds, and it
+    used to be dropped at ingest.
+    """
+    out: list[str] = []
+    for u in (item.get("taggedUsers") or item.get("detailedMentions") or []):
+        name = u.get("username") or u.get("name") if isinstance(u, dict) else u
+        h = str(name or "").strip().lstrip("@").lower()
+        if h and h not in out:
+            out.append(h)
+    return out
+
 # How many DIFFERENT hashtags a handle must be seen on before it is auto-promoted
 # from discoveryQueue to a tracked creator.
 #
@@ -908,6 +926,7 @@ def _persist_hashtag_post(
         "caption": caption[:2000],
         "hashtags": [h.lower() for h in hashtags],
         "mentions": mentions,
+        "taggedUsers": _tagged_users(item),
         "postedAt": posted_at,
         "likesCount": likes,
         "commentsCount": comments,

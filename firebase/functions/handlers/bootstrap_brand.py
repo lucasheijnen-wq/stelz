@@ -115,17 +115,25 @@ def run(brand_id: str, brand_name: str, uid: str, user_email: str | None = None)
     pool_col = fs.hashtag_pool_col(brand_id)
     written = 0
     for platform in ("instagram", "tiktok"):
-        for entry in hashtags.build_pool(
-            slug=brand_id,
-            product_lines=DEFAULT_PRODUCT_LINES,
-            flavours=hashtags.STELZ_FLAVOURS if brand_id == "stelz" else None,
-            events=hashtags.STELZ_EVENTS if brand_id == "stelz" else None,
-            lifestyle=(hashtags.STELZ_LIFESTYLE_IG if platform == "instagram"
-                       else hashtags.STELZ_LIFESTYLE_TT) if brand_id == "stelz" else None,
-            # TikTok search is fuzzy and tag-poor; misspelled tags mostly
-            # return noise there while still costing an actor run each.
-            include_typos=(platform == "instagram"),
-        ):
+        # For stelz: the CANONICAL pool builder, which is also what
+        # seed_brand.py and the tests use. Building a near-copy inline here is
+        # how the category family (#hardseltzernl — the only competitor-
+        # adjacent surface) silently never reached a UI-bootstrapped brand:
+        # only stelz_pool() adds it. Since bootstrap runs at the start of
+        # every dashboard scan and these writes are merge-idempotent, this is
+        # also how pool WIDENINGS reach an existing brand without a manual
+        # seed — the next Run scan click syncs them.
+        entries = (
+            hashtags.stelz_pool(platform) if brand_id == "stelz"
+            else hashtags.build_pool(
+                slug=brand_id,
+                product_lines=DEFAULT_PRODUCT_LINES,
+                # TikTok search is fuzzy and tag-poor; misspelled tags mostly
+                # return noise there while still costing an actor run each.
+                include_typos=(platform == "instagram"),
+            )
+        )
+        for entry in entries:
             pool_col.document(f"{platform}_{entry['tag']}").set(
                 {
                     "tag": entry["tag"],

@@ -131,16 +131,31 @@ STELZ_FLAVOURS = ["cassis", "peach", "lime", "mango", "lemon", "raspberry"]
 STELZ_EVENTS = [
     "casastelz", "stelzhouse", "stelzibiza", "stelzfest", "stelzbeuk",
     "stelzcheck", "stelzparty", "stelzsummer",
+    # Fan-coined tags measured in the wild during Lowlands 2026 — real people
+    # already write these, so searching them is free precision.
+    "welovestelz", "ilovestelz",
 ]
 # Dutch party/occasion tags. Deliberately few and capped low — see module
 # docstring. Their measured post-level hit rate is ~0%; they exist to surface
 # creators whose feeds are then deep-scanned.
+#
+# The names come from the repo's own measured circle lists (the dormant
+# 04_discover_lifestyle groups and the 13-seed creator list), NOT from
+# brainstorming: borrel-family, vriendengroep/ladiesnight, nachtleven,
+# introweek, huisfeest variants. The denylist below subcultures.py still
+# applies in spirit — nothing here is a word that matches all of Dutch social
+# media (no "weekend", no "party", no "gezelligheid").
 STELZ_LIFESTYLE_IG = [
     "vrijmibo", "huisfeest", "koningsdag", "studentenleven",
     "borrel", "festivalseizoen", "terrasweer",
+    "werkborrel", "afterwork", "thuisfeest", "zomerfeest",
+    "vriendinnenuitje", "ladiesnight", "meidenavond",
+    "nachtleven", "uitgaansleven", "introweek",
 ]
 STELZ_LIFESTYLE_TT = [
     "vrijmibo", "huisfeest", "studentenleven", "nederland", "carnaval",
+    "borrel", "koningsdag", "festivalseizoen",
+    "ladiesnight", "nachtleven", "introweek",
 ]
 STELZ_CATEGORY = ["hardseltzernl", "hardseltzer", "hardlemonade"]
 

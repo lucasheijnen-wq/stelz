@@ -634,6 +634,12 @@ export async function fbStepProfiles(limit = 500) {
 export async function fbStepSubcultures() {
   return authedFetch('api_step_subcultures', { brandId: BRAND_ID })
 }
+// The people around recent hits become discovery candidates and graph edges.
+// Free to re-run (reads Firestore only); must precede SRS, which reads the
+// edges this writes.
+export async function fbStepAudience() {
+  return authedFetch('api_step_audience', { brandId: BRAND_ID })
+}
 export async function fbStepSentiment(limit = 400) {
   return authedFetch('api_step_sentiment', { brandId: BRAND_ID, limit })
 }
@@ -652,6 +658,7 @@ export type BrandDoc = {
   embeddingThreshold?: number
   dailyBudgetUsd?: number
   storiesAutoScan?: boolean
+  dailyAutoScan?: boolean
   hashtagYield?: Record<string, number>
   visualCentroidComputedAt?: string | null
   visualCentroidRefCount?: number
@@ -673,6 +680,7 @@ export async function fbGetBrand(brandId = BRAND_ID): Promise<BrandDoc | null> {
     embeddingThreshold: x.embeddingThreshold,
     dailyBudgetUsd: x.dailyBudgetUsd,
     storiesAutoScan: x.storiesAutoScan === true,
+    dailyAutoScan: x.dailyAutoScan === true,
     hashtagYield: x.hashtagYield,
     visualCentroidComputedAt:
       x.visualCentroidComputedAt instanceof Timestamp
@@ -915,7 +923,7 @@ export function fbSubscribeInbox(
 }
 
 export type ScanStepKey =
-  | 'hashtags' | 'creators' | 'stories' | 'profiles' | 'subcultures' | 'srs' | 'sentiment'
+  | 'hashtags' | 'creators' | 'stories' | 'profiles' | 'subcultures' | 'audience' | 'srs' | 'sentiment'
 
 export type ScanStep = {
   state: 'running' | 'done' | 'error'
