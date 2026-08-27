@@ -26,7 +26,21 @@ DETECT_IMAGE_TOPIC = "detect-image"
 DETECT_VIDEO_TOPIC = "detect-video"
 
 
-def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency: int = 6, dry_run: bool = False) -> dict[str, Any]:
+def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency: int = 6,
+        dry_run: bool = False, creator_ids: list[str] | None = None) -> dict[str, Any]:
+    """`creator_ids`: scan exactly these creator docs, ignoring nextScanAt.
+
+    The default (None) keeps the due-queue behaviour the dashboard's brand-wide
+    scan has always had. The named-set path exists for the EVENT pages, and the
+    reason it ignores the due gate is the bug it was built to fix: a project
+    roster sits on a 12-hour cadence, so a second press inside that window found
+    nobody due and reported a perfectly successful scan of zero accounts. From
+    the button that is indistinguishable from a scan that found nothing new,
+    which is how "I pressed it and nothing changed" happens.
+
+    Ids are `platform_handle` composites — the same ones projects store in
+    creatorIds. Still capped by max_creators: a caller naming 500 handles is a
+    cost incident, not a request."""
     brand = fs.brand_doc(brand_id).get()
     if not brand.exists:
         raise ValueError(f"brand not found: {brand_id}")
@@ -39,19 +53,38 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
         # the spend that was blowing it.
         return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0, "videos_enqueued": 0, "skipped": "budget"}
 
-    # Fetch due creators (nextScanAt <= now, status in active set)
+    # Hoisted out of the due-query branch below: the re-schedule at the end of
+    # this function stamps nextScanAt off it, so the named-set path needs it too.
     now = dt.datetime.now(dt.timezone.utc)
-    due_q = (
-        fs.creators_col(brand_id)
-        .where("status", "in", ["discovered", "promoted"])
-        .where("nextScanAt", "<=", now)
-        .limit(max_creators)
-        .stream()
-    )
-    due = [d for d in due_q]
-    log.info(f"due creators: {len(due)}")
-    if not due:
-        return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0}
+
+    # `is not None`, NOT truthiness. An empty list means "this caller meant to
+    # name a roster and came up with nobody", and falling through to the due
+    # queue there would quietly scrape the entire brand off an event button.
+    if creator_ids is not None:
+        # Named set: fetched by doc id, so no composite index and no `in`-query
+        # cap of 30 — a 28-person roster is 56 ids across two platforms.
+        wanted = [str(c).strip().lower() for c in creator_ids if str(c).strip()]
+        refs = [fs.creators_col(brand_id).document(c) for c in wanted[:max_creators]]
+        due = [d for d in fs.db().get_all(refs) if d.exists] if refs else []
+        log.info(f"named creators: {len(due)} of {len(wanted)} requested exist")
+        if not due:
+            # Distinct from "found nothing": these creators are not tracked at
+            # all, and the fix is to import the roster, not to scan again.
+            return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0,
+                    "videos_enqueued": 0, "skipped": "no_creators"}
+    else:
+        # Fetch due creators (nextScanAt <= now, status in active set)
+        due_q = (
+            fs.creators_col(brand_id)
+            .where("status", "in", ["discovered", "promoted"])
+            .where("nextScanAt", "<=", now)
+            .limit(max_creators)
+            .stream()
+        )
+        due = [d for d in due_q]
+        log.info(f"due creators: {len(due)}")
+        if not due:
+            return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0}
 
     # Build handle batches (Apify takes up to ~25 per call)
     posts_col = fs.posts_col(brand_id)

@@ -238,10 +238,15 @@ def main() -> int:
     # was less visible this week". Mixing the two inside ONE file is worse
     # still: the difference is then invisible even in principle.
     existing = {v.get("max_dim") for v in verdicts.values() if "max_dim" in v}
-    if len(existing) == 1 and (settled := existing.pop()) != args.max_dim and not args.redo:
-        print(f"\n  ✕ REFUSED. {len(verdicts)} verdicts in this archive were judged at "
-              f"max_dim={settled}, and this run would add rows at {args.max_dim}.")
-        print(f"    Pass --max-dim {settled} to extend the archive, or --redo to "
+    # Refuse on ANY mismatch, not only while the archive is still uniform — an
+    # already-mixed archive slipping through would entrench exactly the
+    # invisible difference this guard exists to prevent.
+    mismatched = sorted((d for d in existing if d != args.max_dim), key=str)
+    if mismatched and not args.redo:
+        listed = ", ".join(str(d) for d in mismatched)
+        print(f"\n  ✕ REFUSED. Verdicts in this archive were judged at "
+              f"max_dim={listed}, and this run would add rows at {args.max_dim}.")
+        print(f"    Pass --max-dim {listed} to extend the archive, or --redo to "
               f"re-judge all of it at {args.max_dim} (which re-bills every row).")
         return 2
 

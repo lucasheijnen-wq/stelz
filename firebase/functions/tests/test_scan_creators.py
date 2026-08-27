@@ -60,9 +60,10 @@ from handlers import scan_creators  # noqa: E402
 # ── In-memory creators query with REAL inequality semantics ─────────────
 
 class FakeCreatorSnap:
-    def __init__(self, doc_id, data):
+    def __init__(self, doc_id, data, exists=True):
         self.id = doc_id
         self._d = dict(data)
+        self.exists = exists
         self.reference = mock.Mock()
 
     def to_dict(self):
@@ -85,6 +86,10 @@ class FakeCreatorsQuery:
 
     def limit(self, n):
         return FakeCreatorsQuery(self._store, self._filters, n)
+
+    def document(self, doc_id):
+        """A ref is just its id here — get_all below resolves it."""
+        return types.SimpleNamespace(id=doc_id)
 
     def stream(self):
         out = []
@@ -117,6 +122,14 @@ class ScanCreatorsBase(unittest.TestCase):
             creators_col=lambda bid: FakeCreatorsQuery(self.creators),
             posts_col=lambda bid: mock.Mock(),
             scan_runs_col=lambda bid: mock.Mock(add=lambda d: None),
+            # get_all resolves refs by id and reports missing docs as
+            # exists=False — the real client's behaviour, and the reason the
+            # named-set path filters on it rather than assuming every id is real.
+            db=lambda: types.SimpleNamespace(get_all=lambda refs: [
+                FakeCreatorSnap(r.id, self.creators[r.id]) if r.id in self.creators
+                else FakeCreatorSnap(r.id, {}, exists=False)
+                for r in refs
+            ]),
         )
         self.usage = types.SimpleNamespace(
             budget_exhausted=lambda bid: False,
@@ -339,6 +352,81 @@ class _CountingPublisher:
         f = Future()
         f.set_result("id")
         return f
+
+
+class TestNamedRoster(ScanCreatorsBase):
+    """The event pages name their roster instead of taking the due queue.
+
+    The bug this exists for: a project roster sits on a 12-hour cadence, so a
+    second press inside that window found nobody due and returned a perfectly
+    successful scan of zero accounts. From the button that is indistinguishable
+    from "nothing new was posted", which is how a scrape button comes to look
+    broken while reporting success.
+    """
+
+    def test_a_named_creator_is_scanned_even_when_not_due(self):
+        future = dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc)
+        self.creators["instagram_anna"] = {
+            "status": "discovered", "platform": "instagram", "handle": "anna",
+            "nextScanAt": future,
+        }
+        # The due queue would find nobody...
+        out = self.run_scan()
+        self.assertEqual(out["creators_scanned"], 0)
+        self.apify.scrape_profile_ig.assert_not_called()
+
+        # ...but naming her scans her anyway.
+        self.apify.scrape_profile_ig.return_value = [{"id": "1"}, {"id": "2"}]
+        out = self.run_scan(creator_ids=["instagram_anna"])
+        self.apify.scrape_profile_ig.assert_called_once()
+        self.assertEqual(self.apify.scrape_profile_ig.call_args[0][0], ["anna"])
+        self.assertEqual(out["creators_scanned"], 1)
+
+    def test_a_named_creator_with_no_nextScanAt_is_still_scanned(self):
+        # The inequality filter excludes docs missing the field entirely, which
+        # is what makes a stub invisible to the due queue forever. Naming it has
+        # to route around that too, or importing a roster and pressing scan
+        # would do nothing until some other pass stamped it.
+        self.creators["instagram_bo"] = {
+            "status": "discovered", "platform": "instagram", "handle": "bo",
+        }
+        self.assertEqual(self.run_scan()["creators_scanned"], 0)
+        self.assertEqual(self.run_scan(creator_ids=["instagram_bo"])["creators_scanned"], 1)
+
+    def test_both_platforms_come_along(self):
+        self.creators["instagram_anna"] = {
+            "status": "discovered", "platform": "instagram", "handle": "anna"}
+        self.creators["tiktok_anna"] = {
+            "status": "discovered", "platform": "tiktok", "handle": "annatt"}
+        out = self.run_scan(creator_ids=["instagram_anna", "tiktok_anna"])
+        self.assertEqual(out["creators_scanned"], 2)
+
+    def test_ids_that_name_nobody_report_no_creators_not_success(self):
+        # "These people are not tracked" and "these people posted nothing" need
+        # different answers: the first is fixed by importing the roster, the
+        # second by waiting. A bare zero would not tell them apart.
+        out = self.run_scan(creator_ids=["instagram_ghost"])
+        self.assertEqual(out.get("skipped"), "no_creators")
+        self.apify.scrape_profile_ig.assert_not_called()
+
+    def test_an_empty_list_does_not_fall_back_to_the_whole_brand(self):
+        # [] must not be read as None. A caller that meant to name a roster and
+        # computed an empty one would otherwise scrape the entire brand.
+        self.creators["instagram_anna"] = {
+            "status": "discovered", "platform": "instagram", "handle": "anna",
+            "nextScanAt": PAST,
+        }
+        out = self.run_scan(creator_ids=[])
+        self.assertEqual(out.get("skipped"), "no_creators")
+        self.apify.scrape_profile_ig.assert_not_called()
+
+    def test_max_creators_still_caps_a_named_set(self):
+        for i in range(5):
+            self.creators[f"instagram_c{i}"] = {
+                "status": "discovered", "platform": "instagram", "handle": f"c{i}"}
+        out = self.run_scan(creator_ids=[f"instagram_c{i}" for i in range(5)],
+                            max_creators=2)
+        self.assertEqual(out["creators_scanned"], 2)
 
 
 if __name__ == "__main__":

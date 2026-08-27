@@ -134,6 +134,9 @@ export function StoryDetail({ row, onClose }: { row: DetailRow | null; onClose: 
               poster={detailImage(row) ?? undefined}
               controls
               playsInline
+              // Archive clips average 5 MB with a 144 MB outlier, and the dev
+              // middleware serves no-store: only fetch when play is pressed.
+              preload="none"
               className="w-full max-h-[420px] bg-[var(--color-bg)] border border-[var(--color-border)] object-contain"
             />
           ) : (

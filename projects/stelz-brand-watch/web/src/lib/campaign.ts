@@ -44,6 +44,25 @@ export const SOURCE_LABEL: Record<Source, string> = {
   discovery: 'Los gevonden',
 }
 
+/** A stored post's surface — derived, because only SOME rows carry the field.
+ *
+ *  The imported event rows (78_upload_event.py) write `surface` outright. The
+ *  live scanners never do: scan_creators, scan_hashtags and scan_stories predate
+ *  the event layer and write `contentType` and `platform` instead. Defaulting
+ *  the missing field to 'post' files every scanned TikTok as an Instagram post
+ *  and every scanned story as one too — the TikTok KPI then reads zero while the
+ *  IG-post grid fills up with clips.
+ *
+ *  Takes a plain record rather than a Firestore DocumentData so this file stays
+ *  free of the SDK and testable without it. */
+export function surfaceOf(x: Record<string, unknown>): Surface {
+  const named = x.surface
+  if (named === 'story' || named === 'post' || named === 'tiktok') return named
+  if (x.contentType === 'story') return 'story'
+  if (x.platform === 'tiktok') return 'tiktok'
+  return 'post'
+}
+
 export const SURFACE_LABEL: Record<Surface, string> = {
   story: 'IG story',
   post: 'IG post',

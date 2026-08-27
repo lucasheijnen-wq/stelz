@@ -95,7 +95,9 @@ export default function Creator() {
   // is, anders het eerste — met één evenement in de definitie dekt dat alles,
   // en een tweede evenement krijgt zijn eigen boeking.
   const campaignEventId = booking?.event.id ?? EVENTS[0]?.id ?? null
-  const { items: campaignItems, detections: campaignDetections } =
+  const { items: campaignItems, detections: campaignDetections,
+          preview: campaignPreview, sources: campaignSources,
+          loading: campaignLoading } =
     useEventCampaign(campaignEventId)
 
   // Alles wat deze persoon binnen een evenement plaatste. Op creatorHandle én
@@ -201,7 +203,11 @@ export default function Creator() {
     }
   }, [rows, posts, eventRows, eventHits, handle])
 
-  const nothingAnywhere = !loading && !fromEvent && posts.length === 0
+  // The campaign rows load asynchronously too — without that term this page
+  // told a client "@handle plaatste niets" for the half second between the
+  // Firestore answer and the campaign rows landing. On a paid booking that
+  // sentence is a finding; it may never render while the data is in flight.
+  const nothingAnywhere = !loading && !campaignLoading && !fromEvent && posts.length === 0
   const fullName = profileRecord?.fullName ?? booking?.member.name ?? null
 
   return (
@@ -221,9 +227,17 @@ export default function Creator() {
     >
       <ReadOnlyNotice />
 
-      {fromEvent && (
+      {/* Only when SOME row really came from the local fixture — the hook
+          merges it with the online database, so this says "er zit lokale data
+          bij", not "dit is allemaal lokaal". Claiming a scrape that never ran
+          on this machine is the failure this banner exists to prevent. */}
+      {fromEvent && campaignPreview && (
         <Card className="mb-4 px-4 py-2.5 text-[12px] text-[var(--color-warn)]">
-          Preview: echt gescrapte content uit een lokaal bestand, niet uit de database.
+          {campaignSources.online > 0
+            ? `Lokaal + online: ${fmtNum(campaignSources.local)} rijen van de laatste `
+              + `scrape op deze computer, ${fmtNum(campaignSources.online)} uit de online database.`
+            : 'Lokale data: rechtstreeks van de laatste scrape op deze computer, nog niet '
+              + 'uit de online database.'}
         </Card>
       )}
 

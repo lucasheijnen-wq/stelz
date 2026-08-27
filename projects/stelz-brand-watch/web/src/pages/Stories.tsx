@@ -478,12 +478,14 @@ function EmptyState({ project }: { project: Project | null }) {
         <Link to="/settings" className="underline hover:text-[var(--color-ink)]">Instellingen</Link>,
         of haal ze handmatig op met de knop bovenaan het overzicht.
       </p>
-      {/* Dev server only; folded out of a production build with its URL. */}
+      {/* Dev server only; folded out of a production build with its URL. A
+          router Link, not <a>: a full page load from the embedded event tab
+          would re-pay the 25 MB campaign fixtures for one stories preview. */}
       {import.meta.env.DEV && (
         <p className="mt-4">
-          <a href="/stories?preview=stories" className="text-[12px] underline hover:text-[var(--color-ink)]">
+          <Link to="/stories?preview=stories" className="text-[12px] underline hover:text-[var(--color-ink)]">
             Lokale preview openen →
-          </a>
+          </Link>
         </p>
       )}
     </Card>

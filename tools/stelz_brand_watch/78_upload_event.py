@@ -25,9 +25,23 @@ id-segmenten) ze in de live feed tot één post laat collapsen — hetzelfde
 contract als de productie-ingest. Stories volgen productie exact:
 `instagram_story{id}`, bewust zonder scheidingsteken.
 
-TOKEN: log in op het dashboard als member, en haal een vers ID-token op (zie
-DEPLOY-NOTES "Live smoke test"). Tokens verlopen na ~1 uur; de tool meldt een
-401/403 als zodanig in plaats van te blijven proberen.
+TOKEN — DRIE ROUTES, in deze volgorde:
+
+  --token <id-token>   een vers ID-token, met de hand geplakt. Verloopt na ~1
+                       uur; goed voor een eenmalige upload.
+  --token-file <pad>   JSON met een REFRESH-token, standaard
+                       .tmp/scrape-auth-<event>.json. Dit is wat de knop
+                       "Opnieuw scrapen" schrijft: de browser is al ingelogd als
+                       member, en zijn refresh-token wordt hier vlak voor de
+                       upload ingewisseld voor een vers ID-token. Daarom kan een
+                       ronde van een uur nog steeds uploaden — een ID-token dat
+                       bij de start werd meegegeven was tegen die tijd dood.
+  niets                met --if-authed stopt de tool dan rustig (exit 0). De
+                       verversronde draait die vlag, zodat een machine waar
+                       niemand is ingelogd geen ronde als "gefaald" markeert.
+
+Het refresh-token staat in .tmp/ (gitignored) en wordt na een geslaagde upload
+verwijderd. Het is een langlevend inloggeheim: behandel het als een wachtwoord.
 """
 from __future__ import annotations
 
@@ -37,6 +51,8 @@ import importlib.util
 import json
 import mimetypes
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -51,6 +67,52 @@ _espec.loader.exec_module(E)
 DEFAULT_BASE = "https://europe-west1-brand-audit-4b2cc.cloudfunctions.net"
 BRAND_ID = "stelz"
 ROWS_PER_CALL = 300
+# Firebase's public token endpoint: refresh token in, fresh ID token out.
+SECURE_TOKEN = "https://securetoken.googleapis.com/v1/token"
+
+
+def token_file_for(event_id: str) -> Path:
+    """Where the "Opnieuw scrapen" knop parks the round's credentials."""
+    return TMP / f"scrape-auth-{event_id}.json"
+
+
+def id_token_from_refresh(refresh_token: str, api_key: str) -> str:
+    """Exchange a refresh token for a fresh ID token.
+
+    Done HERE, immediately before the upload, and not at the start of the round:
+    an ID token lives ~1 hour and a round can take one, so a token handed over at
+    the click would be dead exactly on the busy days when it matters most."""
+    data = urllib.parse.urlencode({
+        "grant_type": "refresh_token", "refresh_token": refresh_token,
+    }).encode()
+    req = urllib.request.Request(
+        f"{SECURE_TOKEN}?key={urllib.parse.quote(api_key)}", data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())["id_token"]
+    except urllib.error.HTTPError as e:
+        raise SystemExit(
+            "  \u2715 inloggegevens afgewezen door Firebase "
+            f"({e.code}) — log opnieuw in op het dashboard en scrape nog een keer.\n"
+            f"  {e.read().decode()[:200]}")
+
+
+def resolve_token(args) -> tuple[str | None, Path | None]:
+    """(ID-token, het bestand dat het opleverde) — zie de docstring."""
+    if args.token:
+        return args.token, None
+    path = Path(args.token_file) if args.token_file else token_file_for(args.event)
+    if not path.exists():
+        return None, None
+    try:
+        blob = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None, path
+    rt, key = blob.get("refreshToken"), blob.get("apiKey")
+    if not rt or not key:
+        return None, path
+    return id_token_from_refresh(rt, key), path
 
 
 def post_doc_id(it: dict) -> str:
@@ -197,6 +259,12 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--event", default="lowlands-2026", choices=E.available())
     ap.add_argument("--token", help="Firebase ID-token van een brand-member")
+    ap.add_argument("--token-file",
+                    help="JSON met refreshToken+apiKey; standaard "
+                         ".tmp/scrape-auth-<event>.json (door de knop geschreven)")
+    ap.add_argument("--if-authed", action="store_true",
+                    help="geen inloggegevens = rustig stoppen (exit 0) in plaats "
+                         "van een fout. De verversronde draait met deze vlag.")
     ap.add_argument("--base", default=DEFAULT_BASE)
     ap.add_argument("--dry-run", action="store_true",
                     help="alleen tellen en tonen wat er zou gaan")
@@ -229,22 +297,69 @@ def main() -> int:
     if args.dry_run:
         print("  dry-run: niets verstuurd")
         return 0
-    if not args.token:
-        print("  geen --token — zie de docstring voor hoe je er een haalt")
+
+    token, token_path = resolve_token(args)
+    if not token:
+        # Not a failure when the caller said so. The verversronde marks a round
+        # as clean only when EVERY step exited 0, and "nobody is logged in on
+        # this machine" must not turn a good harvest into a red round.
+        #
+        # A REJECTED credential is a different thing and does NOT come through
+        # here — id_token_from_refresh raises, the step exits non-zero, and the
+        # knop turns red. Only a missing or unreadable file lands in this branch,
+        # and the two cases get different sentences because they have different
+        # fixes: log in, versus find out who mangled the file.
+        msg = (f"  {token_path.name} is er wel maar bevat geen bruikbaar "
+               "refreshToken+apiKey — deze ronde blijft lokaal."
+               if token_path and token_path.exists() else
+               "  geen inloggegevens — deze ronde blijft lokaal. Log in op het "
+               "dashboard en scrape opnieuw om ook online bij te werken.")
+        if args.if_authed:
+            print(msg)
+            return 0
+        print("  geen --token en geen bruikbaar --token-file — zie de docstring")
         return 2
+    args.token = token
 
     # 1. Treffer-beelden eerst: de rijen verwijzen naar de Storage-URLs.
+    #
+    # DE LEDGER. Storage is content-addressed, dus een beeld dat al boven staat
+    # krijgt bij een herhaling exact dezelfde URL — de serverkant slaat de
+    # schrijfactie dan over, maar de 575 kB base64 is dan al over de lijn
+    # gegaan. Als staande stap in elke verversronde is dat 76 MB per ronde voor
+    # niets, en het groeit met elk festival mee. De ledger onthoudt lokaal welk
+    # bestand welke URL oplevert, zodat ronde 2 en verder alleen de NIEUWE
+    # treffers versturen. Sleutel is het pad plus de bytegrootte: verandert het
+    # bestand, dan verandert de sleutel en gaat het opnieuw omhoog.
+    ledger_p = TMP / f"uploaded-media-{ev['id']}.json"
+    try:
+        ledger: dict[str, str] = json.loads(ledger_p.read_text())
+    except (OSError, json.JSONDecodeError):
+        ledger = {}
+
     media_urls: dict[str, str] = {}
+    fresh = 0
     for n, (u, p) in enumerate(sorted(hit_media.items()), 1):
+        key = f"{p.name}:{p.stat().st_size}"
+        known = ledger.get(key)
+        if known:
+            media_urls[u] = known
+            continue
         ctype = mimetypes.guess_type(p.name)[0] or "image/jpeg"
         out = call_api(args.base, args.token, {
             "brandId": BRAND_ID, "action": "media",
             "b64": base64.b64encode(p.read_bytes()).decode(),
             "contentType": ctype,
         })
-        media_urls[u] = out["url"]
-        if n % 20 == 0 or n == len(hit_media):
-            print(f"  media {n}/{len(hit_media)}")
+        media_urls[u] = ledger[key] = out["url"]
+        fresh += 1
+        if fresh % 20 == 0:
+            print(f"  media {fresh} nieuw verstuurd ({n}/{len(hit_media)} bekeken)")
+    try:
+        ledger_p.write_text(json.dumps(ledger, indent=0, sort_keys=True))
+    except OSError:
+        pass  # zonder ledger stuurt de volgende ronde gewoon alles opnieuw
+    print(f"  media: {fresh} nieuw, {len(hit_media) - fresh} stond er al")
 
     # 2. Rijen in batches. Post-doc-ids zijn productie-vormig; detection-ids
     #    deterministisch — herdraaien is een upsert.
@@ -274,6 +389,14 @@ def main() -> int:
             "eventId": ev["id"], "data": audience,
         })
         print("  publiek-samenvatting geschreven")
+
+    # The refresh token is a long-lived login secret and it has now done its one
+    # job. The next round gets a fresh one from the browser at the click.
+    if token_path and token_path.exists():
+        try:
+            token_path.unlink()
+        except OSError:
+            print(f"  let op: {token_path.name} kon niet worden opgeruimd")
 
     print(f"\n  klaar — open /evenementen/{ev['id']} op de productie-URL; "
           "de teller daar hoort gelijk te zijn aan 77_voortgang lokaal")

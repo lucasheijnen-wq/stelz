@@ -25,13 +25,15 @@ import {
 } from '../../lib/audience'
 import { compactNum, fmtDate, fmtNum } from '../../lib/format'
 
-export function AudienceTab({ audience }: { audience: Audience | null }) {
+export function AudienceTab({ audience, eventId }: {
+  audience: Audience | null; eventId?: string
+}) {
   if (!audience) {
     return (
       <Card className="p-10 text-center text-[13px] text-[var(--color-ink-muted)] leading-relaxed">
         Nog geen publiekslaag voor dit evenement.<br />
         <code className="text-[11px] bg-[var(--color-surface-2)] px-1.5 py-0.5 mt-2 inline-block">
-          tools/stelz_brand_watch/76_audience.py --event lowlands-2026
+          tools/stelz_brand_watch/76_audience.py --event {eventId ?? 'lowlands-2026'}
         </code>
         <p className="text-[11px] text-[var(--color-ink-subtle)] mt-3 max-w-lg mx-auto">
           Dat script doet geen enkele API-call: het leest de ruwe payloads die de

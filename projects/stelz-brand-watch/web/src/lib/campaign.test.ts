@@ -6,7 +6,7 @@
 // asks what it means.
 import { describe, expect, it } from 'vitest'
 import {
-  joinCampaign, campaignRollup, stelzShare, metricFor, SURFACE_LABEL, SURFACES,
+  joinCampaign, campaignRollup, stelzShare, metricFor, surfaceOf, SURFACE_LABEL, SURFACES,
   type CampaignItem,
 } from './campaign'
 import type { DetectionRow } from './types'
@@ -413,5 +413,37 @@ describe('carousels are one post, not ten', () => {
       [item({ itemId: 'tiktok_video1', creatorHandle: 'lize', platformHandle: 'lize', surface: 'tiktok' })],
       [])
     expect(campaignRollup(one, {}, ['lize']).posts).toBe(1)
+  })
+})
+
+// The bug this guards: the event page used to default a missing `surface` to
+// 'post'. Only the imported rows carry that field — every row the scheduled
+// cloud scans write has `contentType` and `platform` instead — so once those
+// rows reached the page, each scanned TikTok was counted as an Instagram post
+// and the TikTok KPI stayed on zero over a grid full of clips.
+describe('surfaceOf', () => {
+  it('takes the stored surface when the row has one', () => {
+    expect(surfaceOf({ surface: 'tiktok', platform: 'instagram' })).toBe('tiktok')
+    expect(surfaceOf({ surface: 'story', contentType: 'video' })).toBe('story')
+  })
+
+  it('reads a scanner-written story off contentType', () => {
+    expect(surfaceOf({ contentType: 'story', platform: 'instagram' })).toBe('story')
+  })
+
+  it('reads a scanner-written TikTok off platform', () => {
+    expect(surfaceOf({ contentType: 'video', platform: 'tiktok' })).toBe('tiktok')
+  })
+
+  it('prefers story over platform: a TikTok row is never an IG story', () => {
+    // contentType wins, so an instagram story stays a story even though the
+    // platform check sits below it. The ordering is the assertion.
+    expect(surfaceOf({ contentType: 'story', platform: 'tiktok' })).toBe('story')
+  })
+
+  it('falls back to an IG post, and ignores a surface it does not know', () => {
+    expect(surfaceOf({ platform: 'instagram', contentType: 'image' })).toBe('post')
+    expect(surfaceOf({})).toBe('post')
+    expect(surfaceOf({ surface: 'reel' })).toBe('post')
   })
 })

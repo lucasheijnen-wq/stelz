@@ -63,10 +63,26 @@ const clean = (h: string | null | undefined): string =>
  *  comparison in this codebase is already lexicographic on ISO text, and a
  *  festival day is a calendar day with no timezone of its own. */
 export function eventWindow(ev: StelzEvent): { start: string; end: string } {
-  return {
+  const d = derived(ev)
+  if (d.window) return d.window
+  d.window = {
     start: shiftDays(ev.window.start, -(ev.window.preDays ?? 0)),
     end: shiftDays(ev.window.end, ev.window.postDays ?? 0),
   }
+  return d.window
+}
+
+/** UTC day bounds for a window, for a range query against stored timestamps.
+ *
+ *  `inWindow` above compares the ISO date PREFIX of postedAt, and that prefix is
+ *  UTC. So a fetch that selects rows by timestamp has to use UTC bounds too, or
+ *  the two rules disagree by up to two hours at each edge — the fetch drags in
+ *  posts the page then silently discards, and drops posts it would have kept. */
+export function dayBounds(range: { start: string; end: string }): [Date, Date] {
+  return [
+    new Date(`${range.start}T00:00:00.000Z`),
+    new Date(`${range.end}T23:59:59.999Z`),
+  ]
 }
 
 /** Human-readable window, e.g. "17 – 30 aug". */
@@ -103,7 +119,28 @@ export function eventStatus(ev: StelzEvent, today?: string): 'aankomend' | 'live
 }
 
 /** Every handle on the roster, both platforms, as one set. */
+// Per-event memo for the three derived structures below. Event definitions are
+// static JSON imports with stable identities, and matchEvent runs in loops
+// over thousands of rows — rebuilding a Set and two arrays per ROW measured
+// 15–29 ms per pass over the 4.5K-row fixture, several passes per page.
+const derivedCache = new WeakMap<StelzEvent, {
+  roster?: Set<string>
+  tags?: string[]
+  window?: { start: string; end: string }
+}>()
+
+function derived(ev: StelzEvent) {
+  let d = derivedCache.get(ev)
+  if (!d) {
+    d = {}
+    derivedCache.set(ev, d)
+  }
+  return d
+}
+
 export function rosterAccounts(ev: StelzEvent): Set<string> {
+  const d = derived(ev)
+  if (d.roster) return d.roster
   const out = new Set<string>()
   for (const m of ev.roster) {
     const ig = clean(m.instagram)
@@ -111,6 +148,7 @@ export function rosterAccounts(ev: StelzEvent): Set<string> {
     if (ig) out.add(ig)
     if (tt) out.add(tt)
   }
+  d.roster = out
   return out
 }
 
@@ -166,11 +204,14 @@ export function nameMap(ev: StelzEvent): Map<string, string> {
  *  the credit when a post carries several. #stelzlowlands says far more about
  *  why the post was found than #lowlands does, so the specific one wins. */
 export function orderedTags(ev: StelzEvent): string[] {
+  const d = derived(ev)
+  if (d.tags) return d.tags
   const norm = (t: string) => t.replace(/^#/, '').toLowerCase()
-  return [
+  d.tags = [
     ...ev.hashtags.filter((h) => h.family === 'brand').map((h) => norm(h.tag)),
     ...ev.hashtags.filter((h) => h.family !== 'brand').map((h) => norm(h.tag)),
   ]
+  return d.tags
 }
 
 /** The roster in the paste format the import screen parses.

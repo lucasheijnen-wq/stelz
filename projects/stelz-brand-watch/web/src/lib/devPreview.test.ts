@@ -9,7 +9,7 @@
 // version of this file guarded via a helper call and "/preview-stories.json"
 // survived into dist/. Hence: the check must sit inline, ahead of the fetch.
 import { describe, expect, it } from 'vitest'
-import { matchesPreview } from './devPreview'
+import { matchesPreview, previewWanted } from './devPreview'
 
 const SOURCE = import.meta.glob('./devPreview.ts', {
   query: '?raw', import: 'default', eager: true,
@@ -77,5 +77,27 @@ describe('matchesPreview', () => {
   it('is on for the exact kind, wherever it sits in the query', () => {
     expect(matchesPreview('?preview=stories', 'stories')).toBe(true)
     expect(matchesPreview('?tab=feed&preview=stories', 'stories')).toBe(true)
+  })
+})
+
+describe('previewWanted', () => {
+  it('campaign is on by default — the event pages have no other local source', () => {
+    expect(previewWanted('', 'campaign')).toBe(true)
+    expect(previewWanted('?tab=feed', 'campaign')).toBe(true)
+    // The old explicit switch still counts as on, so bookmarked URLs keep working.
+    expect(previewWanted('?preview=campaign', 'campaign')).toBe(true)
+  })
+
+  it('campaign turns off only with the explicit escape hatch', () => {
+    expect(previewWanted('?preview=off', 'campaign')).toBe(false)
+    expect(previewWanted('?tab=feed&preview=off', 'campaign')).toBe(false)
+    // Not a truthiness match: OFF must be exact too.
+    expect(previewWanted('?preview=OFF', 'campaign')).toBe(true)
+  })
+
+  it('stories keeps the strict opt-in rule — fixtures would mask live data', () => {
+    expect(previewWanted('', 'stories')).toBe(false)
+    expect(previewWanted('?preview=campaign', 'stories')).toBe(false)
+    expect(previewWanted('?preview=stories', 'stories')).toBe(true)
   })
 })

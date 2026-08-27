@@ -6,8 +6,9 @@
 //
 // WHY THIS IS NOT IN OLD_ROUTE_REDIRECTS. That map is a plain string table and
 // <Navigate to="/x"> drops everything after the '?'. These two routes carry
-// query state that is not decoration: `?preview=campaign` is the only way to
-// open the local fixture (there is no link to it in a production build), and
+// query state that is not decoration: `?preview=campaign` WAS the only way to
+// open the local fixture (it is the dev default now, but old bookmarks still
+// carry the parameter and `?preview=off` still means something), and
 // `?bron=discovery` is a bookmark someone made to one half of the data. A
 // redirect that silently discards either one looks like the page lost its
 // contents rather than moved.

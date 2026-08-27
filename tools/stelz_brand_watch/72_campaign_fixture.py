@@ -31,7 +31,17 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """tmp + rename. De dev-server streamt deze bestanden terwijl wij ze
+    herbouwen; een afgekapte 200 rendert als "Nog geen data" over een vol
+    archief. os.replace is atomair op hetzelfde filesystem."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 ROOT = Path(__file__).resolve().parents[2]
 TMP = ROOT / ".tmp"
@@ -401,8 +411,8 @@ def main() -> int:
               "(62_stories_archive.py, 70, 71, 73)")
         return 1
 
-    OUT_ITEMS.write_text(json.dumps(items, indent=1))
-    OUT_DETS.write_text(json.dumps(dets, indent=1))
+    _write_atomic(OUT_ITEMS, json.dumps(items, indent=1))
+    _write_atomic(OUT_DETS, json.dumps(dets, indent=1))
 
     print(f"{ev['name']} · {ev['venue']}")
     print("\n".join(report))
@@ -436,7 +446,7 @@ def main() -> int:
           f"het evenement, en dus geen {ev['name']}")
     print(f"\n  wrote {OUT_ITEMS.relative_to(ROOT)}")
     print(f"        {OUT_DETS.relative_to(ROOT)}")
-    print(f"\n  open http://localhost:5173/evenementen/{ev['id']}?preview=campaign")
+    print(f"\n  open http://localhost:5173/evenementen/{ev['id']}")
     return 0
 
 

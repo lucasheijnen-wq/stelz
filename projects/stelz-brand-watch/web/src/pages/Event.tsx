@@ -17,9 +17,12 @@
 // opposite case: a booked creator who posted nothing is the most useful row on
 // the page, and she has no tiles at all.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { PageShell, Card } from '../components/ui'
+import { ScrapeButton } from '../components/ScrapeButton'
+import { EventScanButton } from '../components/EventScanButton'
+import { ScanPanel } from '../components/ScanPanel'
 import { StoryDetail } from '../components/StoryDetail'
 import { StoriesView } from './Stories'
 import { PasteImport } from '../components/PasteImport'
@@ -41,7 +44,12 @@ import { getEvent, type StelzEvent } from '../data/events'
 import {
   matchEvent, evidencedHandlesFor, eventWindow, formatWindow, eventStatus, seedTsv,
 } from '../lib/events'
-import { fbFetchCreatorProfiles, type CreatorProfile } from '../lib/firestore'
+import {
+  fbFetchCreatorProfiles, fbSubscribeScanState,
+  type CreatorProfile, type ScanState,
+} from '../lib/firestore'
+import { scanIsStale } from '../lib/scanProgress'
+import { useNow } from '../lib/useNow'
 import { fetchProjects, projectsAction, type Project } from '../lib/data'
 import { useMembership } from '../lib/membershipContext'
 import { fmtNum, compactNum } from '../lib/format'
@@ -106,10 +114,30 @@ function EventBody({ ev, params, setParams }: {
   const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState<CampaignRow | null>(null)
 
-  // Preview in dev, the imported Firestore rows in production — one hook,
-  // same downstream pipeline either way. See lib/eventData.
+  // EVERYTHING WE HAVE, from both places at once: the local scrape fixtures on
+  // this machine and the Firestore rows — imported ones and whatever the
+  // scheduled cloud scans wrote inside this event's window. One hook, one
+  // merged set, same downstream pipeline. See lib/eventData.
   const { items: campaignItems, detections: campaignDetections,
-          preview, loading: campaignLoading } = useEventCampaign(ev.id)
+          sources, preview, loading: campaignLoading,
+          reload: reloadCampaign } = useEventCampaign(ev.id)
+
+  // The online scan's progress, straight off the brand doc — the same stream
+  // the Home panel reads, so the two can never tell different stories about
+  // one scan.
+  const [scan, setScan] = useState<ScanState | null>(null)
+  useEffect(() => fbSubscribeScanState(setScan), [])
+
+  // Refetch when a scan FINISHES. Without this the rows on screen stay the ones
+  // fetched before the scan ran — the page would sit there, freshly scanned and
+  // visibly unchanged, which is the exact complaint this button exists to fix.
+  const now = useNow(15_000)
+  const scanRunning = !!scan?.startedAt && !scan.finishedAt && !scanIsStale(scan, now)
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (wasRunning.current && !scanRunning) reloadCampaign()
+    wasRunning.current = scanRunning
+  }, [scanRunning, reloadCampaign])
   const audience = useEventAudience(ev.id)
 
   useEffect(() => {
@@ -216,16 +244,47 @@ function EventBody({ ev, params, setParams }: {
       subtitle={`${formatWindow(ev)} · ${ev.venue}`}
       crumbs={[{ label: 'Evenementen', to: '/evenementen' }]}
       actions={
-        <span className={`text-[10px] uppercase tracking-wider px-2 py-1 ${STATUS_TONE[status]}`}>
-          {status}
-        </span>
+        <>
+          {/* TWO BUTTONS, TWO PIPELINES — see components/EventScanButton for
+              why they are not one. This one calls the Cloud Functions, so it is
+              the button that exists in production and works from any machine. */}
+          <EventScanButton scan={scan} project={project} canWrite={canWrite} loading={loading} />
+          {/* Dev server only — the LOCAL pipeline lives on this machine, and
+              the endpoints behind that button exist only in `vite dev`. Inline
+              DEV gate so the build folds the whole render site away. */}
+          {import.meta.env.DEV && <ScrapeButton eventId={ev.id} />}
+          <span className={`text-[10px] uppercase tracking-wider px-2 py-1 ${STATUS_TONE[status]}`}>
+            {status}
+          </span>
+        </>
       }
     >
+      {/* Live progress for the online scan. Renders nothing when idle. */}
+      <ScanPanel scan={scan} />
+
+      {/* WHICH ROWS CAME FROM WHERE. The page merges the local scrape with the
+          online database, so "lokale data" as a blanket label would be wrong
+          the moment both have rows — and the counts are the only way a reader
+          can tell whether what they are looking at survives a deploy. */}
       {preview && (
-        <Card className="mb-4 px-4 py-2.5 text-[12px] text-[var(--color-warn)]">
-          Preview: echt gescrapte content uit een lokaal bestand, niet uit de database.
-          De oordelen komen uit een lokale analyse met hetzelfde model en dezelfde
-          referentiefoto's als productie.
+        <Card className="mb-4 px-4 py-2.5 text-[12px] text-[var(--color-warn)] leading-relaxed">
+          {sources.online > 0 ? (
+            <>
+              <strong className="font-medium">
+                {fmtNum(sources.local)} van deze rijen komen van de laatste scrape op
+                deze computer, {fmtNum(sources.online)} uit de online database.
+              </strong>{' '}
+              Samengevoegd; een post die in allebei staat telt één keer, met het lokale
+              oordeel — dat is op archiefresolutie gemaakt en de online analyse op 512
+              pixels, dus andersom zou een treffer bij het verversen weer een misser
+              worden.
+            </>
+          ) : (
+            <>Lokale data: rechtstreeks van de laatste scrape op deze computer, nog niet
+            uit de online database.</>
+          )}{' '}
+          De lokale oordelen komen uit dezelfde analyse met hetzelfde model en dezelfde
+          referentiefoto&apos;s als productie.
         </Card>
       )}
 
@@ -245,14 +304,18 @@ function EventBody({ ev, params, setParams }: {
 
       {/* THE DENOMINATOR OF THE WHOLE PAGE. Without this line a reader watches
           most of the archive vanish and reads it as a broken scrape. */}
-      <Card className="mb-4 px-4 py-3 text-[12px] text-[var(--color-ink-muted)] leading-relaxed border-l-2 border-[var(--color-border-strong)]">
+      {/* Not while loading: "0 van 0 stuks content" as a statement of fact
+          over a harvested festival is a lie with a card around it. */}
+      {!campaignLoading && <Card className="mb-4 px-4 py-3 text-[12px] text-[var(--color-ink-muted)] leading-relaxed border-l-2 border-[var(--color-border-strong)]">
         <strong className="font-medium text-[var(--color-ink)]">
           {fmtNum(rows.length)} van {fmtNum(allRows.length)} stuks content vallen binnen{' '}
           {formatWindow(ev)}.
         </strong>{' '}
         {outside > 0 && (
-          <>De overige {fmtNum(outside)} zijn ouder of nieuwer — echte posts van dezelfde
-          creators, maar geen {ev.name}. De archieven gaan jaren terug; zonder deze grens
+          <>De overige {fmtNum(outside)} vallen erbuiten: ouder of nieuwer, of wél uit
+          deze dagen maar van accounts die niets met {ev.name} te maken hebben — de
+          dagelijkse scan haalt alles binnen wat het merk noemt, en dat is lang niet
+          allemaal festival. De archieven gaan bovendien jaren terug; zonder deze grens
           telt een festivalpagina alles mee wat er toevallig in staat.{' '}</>
         )}
         <button
@@ -266,7 +329,7 @@ function EventBody({ ev, params, setParams }: {
             {' '}— je kijkt nu naar alles, ook buiten {ev.name}.
           </span>
         )}
-      </Card>
+      </Card>}
 
       {/* ABOVE THE TABS, ON PURPOSE. "How is Stëlz doing on social" is not a
           question about the roster tab or the discovery tab — it is what the
@@ -320,7 +383,7 @@ function EventBody({ ev, params, setParams }: {
       ) : allRows.length === 0 ? (
         <EmptyState ev={ev} />
       ) : tab === 'publiek' ? (
-        <AudienceTab audience={audience} />
+        <AudienceTab audience={audience} eventId={ev.id} />
       ) : tab === 'cijfers' ? (
         <NumbersTab
           rows={scopeRows}
@@ -592,25 +655,54 @@ function SettingsTab({ ev, project, canWrite, onChanged }: {
 
       <Card className="p-5">
         <h2 className="text-[15px] text-[var(--color-ink)] mb-1">Oogsten</h2>
+        {/* Two buttons, two pipelines. Documented in the order someone meets
+            them: the online one is on every dashboard, the local one only where
+            the Python lives. */}
         <p className="text-[12px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mb-3">
-          De scrapers draaien lokaal, want de Cloud Functions staan niet uitgerold. Stories
-          verdwijnen na 24 uur en komen nooit terug — die sweep is de enige die haast heeft.
+          Rechtsboven zit <strong className="text-[var(--color-ink)]">Online scan</strong>: die
+          draait de pijplijn in de cloud voor precies de {ev.roster.length} profielen van deze
+          roster — stories en de feeds van beide platforms, daarna de beeldanalyse. Werkt vanaf
+          elke computer, ook hier op de gepubliceerde versie, want er komt geen Python aan te
+          pas. De voortgang verschijnt bovenaan deze pagina en de rijen worden vanzelf
+          opnieuw opgehaald zodra de scan klaar is. Hashtag-discovery zit er bewust niet
+          standaard bij: die stap gaat over de hashtagpool van het hele merk en niet over de
+          tags van dit evenement, en één klik kan er duizenden Apify-resultaten uit halen —
+          vandaar het aanvinkvakje eronder.
+        </p>
+        <p className="text-[12px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mb-3">
+          In het <strong className="text-[var(--color-ink)]">lokale dashboard</strong> (waar de
+          scrapers draaien) zit rechtsboven de knop{' '}
+          <strong className="text-[var(--color-ink)]">Opnieuw scrapen</strong>: alle vier de
+          archieven verversen, alles nieuws beoordelen, het dashboard bijwerken, en het
+          resultaat naar de online database uploaden — die laatste stap is waarom een scrape
+          hier ook de online pagina verandert. Voortgang staat onder de knop; het volledige log
+          in <code className="text-[11px]">.tmp/scrape-{ev.id}.log</code>. Stories verdwijnen na
+          24 uur en komen nooit terug — die stap is de enige die haast heeft.
+        </p>
+        <p className="text-[12px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mb-3">
+          Uploaden vereist dat je hier ingelogd bent als member: je sessie gaat mee met de klik
+          en wordt vlak vóór het uploaden ingewisseld voor een vers token, zodat ook een ronde
+          van een uur nog mag schrijven. Ben je niet ingelogd, dan meldt de knop dat meteen en
+          blijft de ronde lokaal — de oogst zelf gaat gewoon door.
+        </p>
+        <p className="text-[12px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mb-3">
+          Handmatig kan ook; dit is exact wat de knop uitvoert:
         </p>
         <pre className="text-[11px] bg-[var(--color-surface-2)] p-3 overflow-x-auto leading-relaxed">
-{`62_stories_archive.py   --event ${ev.id}
-70_tiktok_archive.py    --event ${ev.id} --per-handle 30
-71_ig_posts_archive.py  --event ${ev.id} --per-handle 25 --since ${win.start}
-73_lowlands_discovery.py --event ${ev.id} --since ${win.start}
+{`tools/stelz_brand_watch/79_verversronde.sh ${ev.id}
 
-74_analyse.py --event ${ev.id} --archive stories   --max-dim 0
-74_analyse.py --event ${ev.id} --archive ig-posts  --max-dim 0
-74_analyse.py --event ${ev.id} --archive tiktok    --max-dim 0
-74_analyse.py --event ${ev.id} --archive discovery --max-dim 0`}
+# = 62_stories → 70_tiktok → 71_ig_posts (--per-handle 4, laatste 7 dagen)
+#   → 73_discovery → 74_analyse ×4 (--max-dim 0, verplicht)
+#   → 72_campaign_fixture → 76_audience → 61_stories_preview → 77_voortgang
+#   → 78_upload_event (--if-authed)`}
         </pre>
         <p className="text-[11px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mt-3">
-          <code>--max-dim 0</code> altijd meegeven. De standaard is 512, de resolutie van de
-          uitgerolde functie; zonder de vlag daalt het aantal treffers en ziet dat eruit als
-          een merk dat minder zichtbaar werd.
+          De laatste vijf stappen zijn wat het scherm ververst — losse scrapes zonder die
+          stappen laten de pagina ongewijzigd, en zonder de laatste blijft alles op deze
+          computer staan. <code>--max-dim 0</code> is in het script vastgezet: de standaard is
+          512 en een gemengd archief lijkt op een merk dat minder zichtbaar werd.
+          <code>--if-authed</code> laat de uploadstap zichzelf overslaan als niemand is
+          ingelogd, zodat handmatig draaien geen ronde als mislukt markeert.
         </p>
       </Card>
 
@@ -661,21 +753,23 @@ function EmptyState({ ev }: { ev: StelzEvent }) {
     <Card className="p-12 text-center">
       <p className="text-[13px] text-[var(--color-ink-muted)] mb-2">Nog geen data voor {ev.name}.</p>
       <p className="text-[12px] text-[var(--color-ink-subtle)] max-w-[520px] mx-auto leading-relaxed">
-        Deze pagina toont Instagram-stories, Instagram-posts en TikToks naast elkaar. Zolang de
-        scans niet zijn uitgerold, wordt hij gevuld met{' '}
-        <code className="text-[11px]">72_campaign_fixture.py --event {ev.id}</code>.
+        Deze pagina toont Instagram-stories, Instagram-posts en TikToks naast elkaar, uit twee
+        bronnen tegelijk: de laatste scrape op deze computer en de online database — dat laatste
+        is zowel wat er geüpload is als wat de dagelijkse scan zelf binnen {formatWindow(ev)}{' '}
+        heeft opgehaald. Dit scherm betekent dus dat ze allebei leeg zijn, niet dat er één
+        ontbreekt.
       </p>
-      {/* Dev server only — folded out of a production build along with the URL
-          it names. Typing a query parameter you have to be told about is not a
-          way to find a page; on localhost the empty state IS the signpost. */}
+      <p className="mt-4 text-[12px] text-[var(--color-ink-subtle)]">
+        Gebruik <strong className="font-medium text-[var(--color-ink)]">Online scan</strong>{' '}
+        rechtsboven om de eerste ronde te draaien.
+      </p>
+      {/* Dev server only — folded out of a production build, because the local
+          pipeline it names exists nowhere else. */}
       {import.meta.env.DEV && (
-        <p className="mt-4">
-          <a
-            href={`/evenementen/${ev.id}?preview=campaign`}
-            className="text-[12px] underline hover:text-[var(--color-ink)]"
-          >
-            Lokale preview openen →
-          </a>
+        <p className="mt-1 text-[12px] text-[var(--color-ink-subtle)]">
+          Of{' '}
+          <strong className="font-medium text-[var(--color-ink)]">Opnieuw scrapen</strong>{' '}
+          voor de lokale pijplijn; die vult meteen ook de online database.
         </p>
       )}
     </Card>
