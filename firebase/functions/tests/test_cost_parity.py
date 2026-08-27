@@ -156,9 +156,15 @@ class TestRecipeInputsMatchTheCallSites(unittest.TestCase):
         # fbStepHashtags(perTag = 500, maxTags = 50) etc. If someone changes the
         # call site and not the table, the price card quietly starts describing
         # a scan nobody runs.
+        # The trailing `[,)]` lets the signature GROW — fbStepCreators gained an
+        # optional creatorIds for the event pages — while still pinning the two
+        # defaults, which is the thing the price card actually depends on.
+        # Anchoring on `\)` made this test fail on a new parameter that could
+        # not affect a price, which teaches people to loosen the assertion
+        # rather than read it.
         for sig, keys in (
-            (r"fbStepHashtags\(perTag = (\d+), maxTags = (\d+)\)", ("hashtagPerTag", "hashtagMaxTags")),
-            (r"fbStepCreators\(maxCreators = (\d+), postsPer = (\d+)\)", ("creatorMax", "creatorPostsPer")),
+            (r"fbStepHashtags\(perTag = (\d+), maxTags = (\d+)[,)]", ("hashtagPerTag", "hashtagMaxTags")),
+            (r"fbStepCreators\(maxCreators = (\d+), postsPer = (\d+)[,)]", ("creatorMax", "creatorPostsPer")),
         ):
             m = re.search(sig, self.firestore_ts)
             self.assertIsNotNone(m, f"call site not found: {sig}")

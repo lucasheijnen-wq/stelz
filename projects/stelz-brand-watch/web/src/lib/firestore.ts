@@ -615,14 +615,24 @@ export async function fbBootstrapBrand(brandName = 'Stelz') {
 export async function fbStepHashtags(perTag = 150, maxTags = 30) {
   return authedFetch('api_step_hashtags', { brandId: BRAND_ID, perTag, maxTags })
 }
-export async function fbStepCreators(maxCreators = 80, postsPer = 8) {
-  return authedFetch('api_step_creators', { brandId: BRAND_ID, maxCreators, postsPer })
+// `creatorIds` (platform_handle composites) scans exactly those creators and
+// ignores the due queue. OMITTED, not empty, for the brand-wide scan: the
+// server reads a missing key as "use the due queue" and an empty list as "the
+// caller named a roster and it was empty", which are opposite instructions.
+export async function fbStepCreators(maxCreators = 80, postsPer = 8, creatorIds?: string[]) {
+  return authedFetch('api_step_creators', {
+    brandId: BRAND_ID, maxCreators, postsPer,
+    ...(creatorIds ? { creatorIds } : {}),
+  })
 }
 // Instagram stories for tracked creators. Independent of the other steps —
 // nothing downstream reads it — so the UI fires it in parallel. Stories expire
 // after 24h, which is why a scheduled version of this runs every 6 hours.
-export async function fbStepStories(maxHandles = 60) {
-  return authedFetch('api_step_stories', { brandId: BRAND_ID, maxHandles })
+export async function fbStepStories(maxHandles = 60, creatorIds?: string[]) {
+  return authedFetch('api_step_stories', {
+    brandId: BRAND_ID, maxHandles,
+    ...(creatorIds ? { creatorIds } : {}),
+  })
 }
 // fbStepScore removed in productization cleanup — SRS already covers the signal.
 export async function fbStepSrs() {
@@ -1333,6 +1343,22 @@ function dedupeDocs(
   const out = new Map<string, QueryDocumentSnapshot<DocumentData>>()
   for (const snap of snaps) for (const d of snap?.docs ?? []) out.set(d.id, d)
   return [...out.values()]
+}
+
+/** Forget the cached rows for an event, so the next fetch really goes out.
+ *
+ *  The cache is what keeps the events LIST page from paying the read bill once
+ *  per row, and it is deliberately per-tab-lifetime. But a scan that just
+ *  finished wrote new rows, and without this the page would keep serving the
+ *  answer it got before the scan ran — "I pressed scan and nothing changed",
+ *  arrived at from the opposite direction. */
+export function fbClearEventCampaignCache(eventId?: string): void {
+  if (!eventId) return eventCampaignCache.clear()
+  for (const key of [...eventCampaignCache.keys()]) {
+    // Keys are `brand|event|range`; match the event segment exactly so
+    // "lowlands-2026" never clears "lowlands-2026-test".
+    if (key.split('|')[1] === eventId) eventCampaignCache.delete(key)
+  }
 }
 
 export function fbFetchEventCampaign(

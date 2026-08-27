@@ -225,6 +225,28 @@ def _require_auth(req: https_fn.Request) -> str:
     return decoded["uid"]
 
 
+# A roster is 28 people across two platforms; 200 is generous headroom and
+# still far below a number that could turn one click into a cost incident.
+MAX_NAMED_CREATORS = 200
+
+
+def _creator_ids(body: dict) -> list[str] | None:
+    """`creatorIds` from a request body, or None for the brand-wide default.
+
+    None and [] must not mean the same thing. None is "use the due queue";
+    an empty list arriving from a caller that meant to name a roster would,
+    if treated as None, silently scan the whole brand instead of the event —
+    so it stays a list and the handler reports no_creators."""
+    raw = body.get("creatorIds")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError("creatorIds must be a list of platform_handle ids")
+    if len(raw) > MAX_NAMED_CREATORS:
+        raise ValueError(f"creatorIds: at most {MAX_NAMED_CREATORS} per call")
+    return [str(c).strip().lower() for c in raw if str(c).strip()]
+
+
 def _require_brand_member(uid: str, brand_id: str) -> None:
     """Every write path goes through here. Non-members get PERMISSION_DENIED.
 
@@ -375,6 +397,9 @@ def api_step_creators(req: https_fn.Request) -> https_fn.Response:
         brand_id,
         max_creators=int(body.get("maxCreators") or 80),
         posts_per=int(body.get("postsPer") or 6),
+        # An event page names its roster so the scan is not at the mercy of the
+        # due queue; the brand-wide button sends nothing and keeps that queue.
+        creator_ids=_creator_ids(body),
     ), step="creators")
 
 
@@ -388,6 +413,7 @@ def api_step_stories(req: https_fn.Request) -> https_fn.Response:
     return _run_step(req, lambda brand_id, body: scan_stories.run(
         brand_id,
         max_handles=int(body.get("maxHandles") or scan_stories.DEFAULT_MAX_HANDLES),
+        creator_ids=_creator_ids(body),
         # A person started this session from the dashboard, so its fan-out
         # belongs in the scan panel's denominator. The 6-hourly scheduler
         # deliberately leaves this off.

@@ -17,10 +17,12 @@
 // opposite case: a booked creator who posted nothing is the most useful row on
 // the page, and she has no tiles at all.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { PageShell, Card } from '../components/ui'
 import { ScrapeButton } from '../components/ScrapeButton'
+import { EventScanButton } from '../components/EventScanButton'
+import { ScanPanel } from '../components/ScanPanel'
 import { StoryDetail } from '../components/StoryDetail'
 import { StoriesView } from './Stories'
 import { PasteImport } from '../components/PasteImport'
@@ -42,7 +44,12 @@ import { getEvent, type StelzEvent } from '../data/events'
 import {
   matchEvent, evidencedHandlesFor, eventWindow, formatWindow, eventStatus, seedTsv,
 } from '../lib/events'
-import { fbFetchCreatorProfiles, type CreatorProfile } from '../lib/firestore'
+import {
+  fbFetchCreatorProfiles, fbSubscribeScanState,
+  type CreatorProfile, type ScanState,
+} from '../lib/firestore'
+import { scanIsStale } from '../lib/scanProgress'
+import { useNow } from '../lib/useNow'
 import { fetchProjects, projectsAction, type Project } from '../lib/data'
 import { useMembership } from '../lib/membershipContext'
 import { fmtNum, compactNum } from '../lib/format'
@@ -112,7 +119,25 @@ function EventBody({ ev, params, setParams }: {
   // scheduled cloud scans wrote inside this event's window. One hook, one
   // merged set, same downstream pipeline. See lib/eventData.
   const { items: campaignItems, detections: campaignDetections,
-          sources, preview, loading: campaignLoading } = useEventCampaign(ev.id)
+          sources, preview, loading: campaignLoading,
+          reload: reloadCampaign } = useEventCampaign(ev.id)
+
+  // The online scan's progress, straight off the brand doc — the same stream
+  // the Home panel reads, so the two can never tell different stories about
+  // one scan.
+  const [scan, setScan] = useState<ScanState | null>(null)
+  useEffect(() => fbSubscribeScanState(setScan), [])
+
+  // Refetch when a scan FINISHES. Without this the rows on screen stay the ones
+  // fetched before the scan ran — the page would sit there, freshly scanned and
+  // visibly unchanged, which is the exact complaint this button exists to fix.
+  const now = useNow(15_000)
+  const scanRunning = !!scan?.startedAt && !scan.finishedAt && !scanIsStale(scan, now)
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (wasRunning.current && !scanRunning) reloadCampaign()
+    wasRunning.current = scanRunning
+  }, [scanRunning, reloadCampaign])
   const audience = useEventAudience(ev.id)
 
   useEffect(() => {
@@ -220,8 +245,12 @@ function EventBody({ ev, params, setParams }: {
       crumbs={[{ label: 'Evenementen', to: '/evenementen' }]}
       actions={
         <>
-          {/* Dev server only — the scrape pipeline lives on this machine, and
-              the endpoints behind the button exist only in `vite dev`. Inline
+          {/* TWO BUTTONS, TWO PIPELINES — see components/EventScanButton for
+              why they are not one. This one calls the Cloud Functions, so it is
+              the button that exists in production and works from any machine. */}
+          <EventScanButton scan={scan} project={project} canWrite={canWrite} loading={loading} />
+          {/* Dev server only — the LOCAL pipeline lives on this machine, and
+              the endpoints behind that button exist only in `vite dev`. Inline
               DEV gate so the build folds the whole render site away. */}
           {import.meta.env.DEV && <ScrapeButton eventId={ev.id} />}
           <span className={`text-[10px] uppercase tracking-wider px-2 py-1 ${STATUS_TONE[status]}`}>
@@ -230,6 +259,9 @@ function EventBody({ ev, params, setParams }: {
         </>
       }
     >
+      {/* Live progress for the online scan. Renders nothing when idle. */}
+      <ScanPanel scan={scan} />
+
       {/* WHICH ROWS CAME FROM WHERE. The page merges the local scrape with the
           online database, so "lokale data" as a blanket label would be wrong
           the moment both have rows — and the counts are the only way a reader
@@ -623,6 +655,20 @@ function SettingsTab({ ev, project, canWrite, onChanged }: {
 
       <Card className="p-5">
         <h2 className="text-[15px] text-[var(--color-ink)] mb-1">Oogsten</h2>
+        {/* Two buttons, two pipelines. Documented in the order someone meets
+            them: the online one is on every dashboard, the local one only where
+            the Python lives. */}
+        <p className="text-[12px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mb-3">
+          Rechtsboven zit <strong className="text-[var(--color-ink)]">Online scan</strong>: die
+          draait de pijplijn in de cloud voor precies de {ev.roster.length} profielen van deze
+          roster — stories en de feeds van beide platforms, daarna de beeldanalyse. Werkt vanaf
+          elke computer, ook hier op de gepubliceerde versie, want er komt geen Python aan te
+          pas. De voortgang verschijnt bovenaan deze pagina en de rijen worden vanzelf
+          opnieuw opgehaald zodra de scan klaar is. Hashtag-discovery zit er bewust niet
+          standaard bij: die stap gaat over de hashtagpool van het hele merk en niet over de
+          tags van dit evenement, en één klik kan er duizenden Apify-resultaten uit halen —
+          vandaar het aanvinkvakje eronder.
+        </p>
         <p className="text-[12px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mb-3">
           In het <strong className="text-[var(--color-ink)]">lokale dashboard</strong> (waar de
           scrapers draaien) zit rechtsboven de knop{' '}
@@ -713,14 +759,17 @@ function EmptyState({ ev }: { ev: StelzEvent }) {
         heeft opgehaald. Dit scherm betekent dus dat ze allebei leeg zijn, niet dat er één
         ontbreekt.
       </p>
-      {/* Dev server only — folded out of a production build. Both sources load
-          automatically now, so reaching this card in dev means neither has
-          anything and the button is the way out. */}
+      <p className="mt-4 text-[12px] text-[var(--color-ink-subtle)]">
+        Gebruik <strong className="font-medium text-[var(--color-ink)]">Online scan</strong>{' '}
+        rechtsboven om de eerste ronde te draaien.
+      </p>
+      {/* Dev server only — folded out of a production build, because the local
+          pipeline it names exists nowhere else. */}
       {import.meta.env.DEV && (
-        <p className="mt-4 text-[12px] text-[var(--color-ink-subtle)]">
-          Gebruik{' '}
+        <p className="mt-1 text-[12px] text-[var(--color-ink-subtle)]">
+          Of{' '}
           <strong className="font-medium text-[var(--color-ink)]">Opnieuw scrapen</strong>{' '}
-          rechtsboven om de eerste ronde te draaien; die vult meteen ook de online database.
+          voor de lokale pijplijn; die vult meteen ook de online database.
         </p>
       )}
     </Card>

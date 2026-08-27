@@ -244,8 +244,20 @@ def _mark_run(brand_id: str, *, found: int, checked: int, skipped: str | None = 
 
 
 def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = False,
-        session_counters: bool = False) -> dict[str, Any]:
-    """`session_counters`: bump scan.detectTasksEnqueued for this run's fan-out.
+        session_counters: bool = False,
+        creator_ids: list[str] | None = None) -> dict[str, Any]:
+    """`creator_ids`: take stories for exactly these creator docs.
+
+    The default (None) keeps the tier-based sweep. The named-set path is for the
+    EVENT pages: the tier query carries a `limit` and no ordering, so on a brand
+    with more tracked creators than the limit it is arbitrary which ones a run
+    covers — an event roster could sit outside it and the button would look
+    like it worked while never touching the people it was pressed for.
+
+    Ids are `platform_handle` composites; the Instagram ones are used and the
+    rest ignored, because stories are an Instagram surface.
+
+    `session_counters`: bump scan.detectTasksEnqueued for this run's fan-out.
 
     True only for the HTTP step a person started from the dashboard — the scan
     panel's denominator must count the work THAT session enqueued. The 6-hourly
@@ -265,16 +277,27 @@ def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = F
         _mark_run(brand_id, found=0, checked=0, skipped="budget")
         return {**zero, "skipped": "budget"}
 
-    # Tracked creators only. Stories cost more per call than feed posts, and a
-    # tier_3 creator is by definition one nobody asked us to follow closely.
-    # Project members (the Lowlands roster) are tier_2, so they are included.
-    due = list(
-        fs.creators_col(brand_id)
-        .where("platform", "==", "instagram")
-        .where("tier", "in", ["tier_1", "tier_2"])
-        .limit(max_handles)
-        .stream()
-    )
+    # `is not None`, not truthiness — see the same note in scan_creators: an
+    # empty named set must not fall back to the brand-wide sweep.
+    if creator_ids is not None:
+        # Named set, by doc id. Stories are Instagram-only, so a roster's TikTok
+        # ids are dropped here rather than fetched and silently ignored later.
+        wanted = [str(c).strip().lower() for c in creator_ids
+                  if str(c).strip().startswith("instagram_")][:max_handles]
+        refs = [fs.creators_col(brand_id).document(c) for c in wanted]
+        due = [d for d in fs.db().get_all(refs) if d.exists] if refs else []
+    else:
+        # Tracked creators only. Stories cost more per call than feed posts, and
+        # a tier_3 creator is by definition one nobody asked us to follow
+        # closely. Project members (the Lowlands roster) are tier_2, so they are
+        # included.
+        due = list(
+            fs.creators_col(brand_id)
+            .where("platform", "==", "instagram")
+            .where("tier", "in", ["tier_1", "tier_2"])
+            .limit(max_handles)
+            .stream()
+        )
     by_handle: dict[str, Any] = {}
     for c in due:
         cd = c.to_dict() or {}

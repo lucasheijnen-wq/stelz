@@ -27,13 +27,14 @@
 // groupHitsByPost — is byte-for-byte the same code on both paths. Attribution
 // stays derived, never trusted from a stored label.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   NO_AUDIENCE, NO_FIXTURE, previewWanted,
   useAudiencePreview, useCampaignDetectionsPreview, useCampaignPreview,
 } from './devPreview'
 import {
-  fbFetchEventAudience, fbFetchEventCampaign, type EventCampaign,
+  fbClearEventCampaignCache, fbFetchEventAudience, fbFetchEventCampaign,
+  type EventCampaign,
 } from './firestore'
 import { getEvent } from '../data/events'
 import { eventWindow } from './events'
@@ -65,6 +66,10 @@ export function useEventCampaign(eventId: string | null): {
    *  this: content may render from whichever half arrived first, but "X van Y
    *  stuks content" must not be printed over half an answer and then change. */
   loading: boolean
+  /** Drop the cached rows and fetch again. For after a scan: the cache is
+   *  per-tab-lifetime, so a finished scan's new rows would otherwise not appear
+   *  until someone reloaded the page by hand. */
+  reload: () => void
 } {
   const previewItems = useCampaignPreview()
   const previewDets = useCampaignDetectionsPreview()
@@ -96,19 +101,28 @@ export function useEventCampaign(eventId: string | null): {
   // react-hooks flags), and a slow response for the PREVIOUS event can never be
   // merged into this one's rows — it arrives under the old key and is ignored.
   const [live, setLive] = useState<{ key: string; data: EventCampaign | null } | null>(null)
+  // Bumped by reload(). Part of the result key as well as the effect's deps, so
+  // a refetch is un-settled until it lands — the page shows "laden" over the
+  // old rows rather than presenting them as the post-scan answer.
+  const [gen, setGen] = useState(0)
 
   useEffect(() => {
     if (!eventId) return
     let cancelled = false
-    const key = `${eventId}|${from}|${to}`
+    const key = `${eventId}|${from}|${to}|${gen}`
     fbFetchEventCampaign(eventId, from && to ? { start: from, end: to } : null)
       .then((data) => { if (!cancelled) setLive({ key, data }) })
       .catch(() => { if (!cancelled) setLive({ key, data: null }) })
     return () => { cancelled = true }
-  }, [eventId, from, to])
+  }, [eventId, from, to, gen])
 
-  const liveSettled = live != null && live.key === liveKey
+  const liveSettled = live != null && live.key === `${liveKey}|${gen}`
   const liveData = liveSettled ? live.data : null
+
+  const reload = useCallback(() => {
+    if (eventId) fbClearEventCampaignCache(eventId)
+    setGen((g) => g + 1)
+  }, [eventId])
 
   const merged = useMemo(() => {
     const onlineItems = liveData?.items ?? []
@@ -139,6 +153,7 @@ export function useEventCampaign(eventId: string | null): {
     sources: merged.sources,
     preview: merged.sources.local > 0,
     loading: eventId != null && (!liveSettled || !localSettled),
+    reload,
   }
 }
 
