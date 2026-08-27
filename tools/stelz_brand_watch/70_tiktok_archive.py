@@ -51,6 +51,11 @@ import requests
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "firebase" / "functions"))
 
+_fspec = importlib.util.spec_from_file_location(
+    "_fetch", Path(__file__).with_name("_fetch.py"))
+F = importlib.util.module_from_spec(_fspec)
+_fspec.loader.exec_module(F)
+
 _spec = importlib.util.spec_from_file_location(
     "_events", Path(__file__).with_name("_events.py"))
 E = importlib.util.module_from_spec(_spec)
@@ -155,18 +160,9 @@ def normalise(item: dict, fallback_handle: str) -> dict | None:
 
 
 def download(url: str | None, dest: Path) -> int:
-    if not url:
-        return 0
-    if dest.exists() and dest.stat().st_size > 0:
-        return dest.stat().st_size
-    try:
-        r = requests.get(url, timeout=90, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-    except Exception as e:
-        print(f"    ✕ cover {dest.name}: {str(e)[:70]}")
-        return 0
-    dest.write_bytes(r.content)
-    return len(r.content)
+    """Also 73's downloader — it imports this module rather than keeping a
+    second opinion. Timeouts and the dead-host rule live in _fetch."""
+    return F.download(url, dest)
 
 
 def download_video(entry: dict, dest: Path) -> int:
@@ -181,14 +177,12 @@ def download_video(entry: dict, dest: Path) -> int:
         return dest.stat().st_size
     direct = entry.get("download_url")
     if direct:
-        try:
-            r = requests.get(direct, timeout=120, headers={"User-Agent": "Mozilla/5.0"})
-            r.raise_for_status()
-            if len(r.content) > 10_000:
-                dest.write_bytes(r.content)
-                return len(r.content)
-        except Exception:
-            pass
+        # min_bytes: a throttled TikTok answers with a short error page and a
+        # 200, so "it downloaded" is not the same as "it is a video".
+        n = F.download(direct, dest, read_timeout=F.VIDEO_READ_TIMEOUT,
+                       min_bytes=10_000, quiet=True)
+        if n:
+            return n
     page = entry.get("url")
     if not page:
         return 0

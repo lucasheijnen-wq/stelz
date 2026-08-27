@@ -46,6 +46,11 @@ import requests
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "firebase" / "functions"))
 
+_fspec = importlib.util.spec_from_file_location(
+    "_fetch", Path(__file__).with_name("_fetch.py"))
+F = importlib.util.module_from_spec(_fspec)
+_fspec.loader.exec_module(F)
+
 _spec = importlib.util.spec_from_file_location(
     "_events", Path(__file__).with_name("_events.py"))
 E = importlib.util.module_from_spec(_spec)
@@ -150,18 +155,11 @@ def rows_for(item: dict) -> list[dict]:
 
 
 def download(url: str | None, dest: Path) -> int:
-    if not url:
-        return 0
-    if dest.exists() and dest.stat().st_size > 0:
-        return dest.stat().st_size
-    try:
-        r = requests.get(url, timeout=90, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-    except Exception as e:
-        print(f"    ✕ {dest.name}: {str(e)[:70]}")
-        return 0
-    dest.write_bytes(r.content)
-    return len(r.content)
+    """Thin wrapper so the loop below reads unchanged. The timeouts, the
+    dead-host rule and the concurrency live in _fetch, shared with 62 and 70 —
+    this used to be a fourth copy with a 90-second scalar timeout, which is how
+    one unreachable CDN host cost a round 25 minutes."""
+    return F.download(url, dest)
 
 
 def known_ids() -> set[str]:
@@ -223,20 +221,47 @@ def main() -> int:
     already = known_ids()
     added = skipped = old = 0
     bytes_saved = 0
-    with P.index.open("a") as idx:
-        for item in items:
-            rows = rows_for(item)
-            if not rows:
+
+    # WHICH POSTS SURVIVE THE FILTERS — decided once, here, so the warm-up below
+    # and the bookkeeping loop after it cannot end up disagreeing about what
+    # this run is fetching.
+    planned: list[tuple[dict, list[dict]]] = []
+    for item in items:
+        rows = rows_for(item)
+        if not rows:
+            continue
+        if cutoff and rows[0].get("posted_at"):
+            try:
+                when = dt.datetime.fromisoformat(
+                    rows[0]["posted_at"].replace("Z", "+00:00"))
+                if when < cutoff:
+                    old += 1
+                    continue
+            except Exception:
+                pass
+        planned.append((item, rows))
+
+    # CONCURRENT WARM-UP. Every file the loop below is about to ask for, pulled
+    # six at a time instead of one. It changes nothing about the loop: download()
+    # returns immediately for a file already on disk, so the order, the counters
+    # and the index writes stay exactly as they were — this only stops the round
+    # standing still while one CDN thinks about it.
+    jobs = []
+    for _, rows in planned:
+        for e in rows:
+            if e["item_id"] in already:
                 continue
-            if cutoff and rows[0].get("posted_at"):
-                try:
-                    when = dt.datetime.fromisoformat(
-                        rows[0]["posted_at"].replace("Z", "+00:00"))
-                    if when < cutoff:
-                        old += 1
-                        continue
-                except Exception:
-                    pass
+            iid = e["item_id"]
+            jobs.append((e["cover_url"], P.media / f"{iid}.jpg"))
+            if e["media_type"] == "video" and not args.no_video:
+                jobs.append((e["video_url"], P.media / f"{iid}.mp4",
+                             F.VIDEO_READ_TIMEOUT))
+    if jobs:
+        print(f"\n  {len(jobs)} bestanden ophalen, {F.PREFETCH_WORKERS} tegelijk")
+        F.prefetch(jobs)
+
+    with P.index.open("a") as idx:
+        for item, rows in planned:
             code = rows[0]["short_code"]
             (P.raw / f"{code}.json").write_text(json.dumps(item, indent=1))
             for e in rows:

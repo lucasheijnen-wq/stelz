@@ -49,6 +49,11 @@ from handlers.scan_stories import STORIES_ACTOR, _actor_payload, _normalize_item
 
 APIFY = "https://api.apify.com/v2"
 
+_fspec = importlib.util.spec_from_file_location(
+    "_fetch", Path(__file__).with_name("_fetch.py"))
+F = importlib.util.module_from_spec(_fspec)
+_fspec.loader.exec_module(F)
+
 _spec = importlib.util.spec_from_file_location(
     "_events", Path(__file__).with_name("_events.py"))
 E = importlib.util.module_from_spec(_spec)
@@ -116,17 +121,10 @@ def known_ids() -> set[str]:
 
 def download(url: str, dest: Path) -> int:
     """Bytes written, or 0. A dead link is expected, not exceptional — these
-    are signed URLs and some are already stale by the time we get here."""
-    if dest.exists() and dest.stat().st_size > 0:
-        return dest.stat().st_size
-    try:
-        r = requests.get(url, timeout=60)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"    ✕ {dest.name}: {str(e)[:80]}")
-        return 0
-    dest.write_bytes(r.content)
-    return len(r.content)
+    are signed URLs and some are already stale by the time we get here. What is
+    not acceptable is being slow about it, which is why the timeouts and the
+    dead-host rule live in _fetch, shared with 70 and 71."""
+    return F.download(url, dest)
 
 
 def main() -> int:
