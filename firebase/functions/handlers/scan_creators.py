@@ -227,6 +227,12 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
         "posts_added": posts_added,
         "images_enqueued": images_enqueued,
         "videos_enqueued": videos_enqueued,
+        # HOW the creators were chosen — the event button reads this back. A
+        # deployed backend that predates creator_ids silently ignores the field
+        # and scans the due queue instead of the roster it was asked for; the
+        # marker's ABSENCE in the response is how the frontend detects that and
+        # says so, rather than reporting a roster scan that never happened.
+        "scope": "named" if creator_ids is not None else "due",
     }
 
 

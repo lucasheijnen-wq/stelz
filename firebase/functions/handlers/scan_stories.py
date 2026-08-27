@@ -465,6 +465,9 @@ def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = F
         # refreshed (poll counts climb while a story is live) but the image is
         # not re-analysed.
         "alreadyHad": reseen,
+        # Same contract as scan_creators: absent on an old deployed backend,
+        # which is how the event button knows its roster was silently ignored.
+        "scope": "named" if creator_ids is not None else "tier",
     }
     _mark_run(brand_id, found=stories_found, checked=len(handles))
     fs.scan_runs_col(brand_id).add({

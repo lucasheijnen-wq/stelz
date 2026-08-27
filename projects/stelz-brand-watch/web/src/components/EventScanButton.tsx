@@ -59,6 +59,17 @@ export function EventScanButton({ scan, project, canWrite, loading }: {
   const busy = clicking || running
   const roster = project?.creatorIds ?? []
 
+  // An aborted POST is not a failed scan: the function keeps running server-
+  // side after the connection drops, and the scan-state stream is the truth.
+  // When that stream says a scan is underway, a lingering fetch error would be
+  // contradicting it on the same screen — clear it. During render, same
+  // pattern as ScanPanel's phase transition, so no flash of both.
+  const [lastRunning, setLastRunning] = useState(false)
+  if (running !== lastRunning) {
+    setLastRunning(running)
+    if (running && error) setError(null)
+  }
+
   if (loading) return null
 
   // Nothing to scan and nothing to explain away: the roster lives in a project
@@ -90,7 +101,18 @@ export function EventScanButton({ scan, project, canWrite, loading }: {
       // never queue behind a creator scrape that can run for minutes.
       void fbStepStories(ROSTER_CAP, roster)
         .catch((e) => setError(`Stories: ${(e as Error).message}`))
-      await fbStepCreators(ROSTER_CAP, POSTS_PER, roster)
+      const out = await fbStepCreators(ROSTER_CAP, POSTS_PER, roster) as { scope?: string }
+      // THE SILENT WRONG SCAN. A deployed backend that predates creatorIds
+      // ignores the field without a word and scans the brand-wide due queue
+      // instead of this roster. The new handler stamps scope:'named' when it
+      // actually used the list; its absence means the roster never reached the
+      // selection — worth a warning, not an error, because the scan that DID
+      // run is harmless, just not the one this button promises.
+      if (out.scope !== 'named') {
+        setError('De online pijplijn draait nog een oude versie zonder '
+          + 'roster-scoping — deze scan liep merkbreed, niet over deze roster. '
+          + 'Vraag om een functions-deploy.')
+      }
       if (withTags) {
         await fbStepHashtags()
       }

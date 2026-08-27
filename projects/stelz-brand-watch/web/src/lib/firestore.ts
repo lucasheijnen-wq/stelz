@@ -29,6 +29,7 @@ import { surfaceOf, type CampaignItem } from './campaign'
 import { dayBounds } from './events'
 import type { Audience } from './audience'
 import { spendBreakdown, type SpendLine } from './costs'
+import { diagnoseUnreachable, type ProbeOutcome } from './functionsDiagnose'
 
 // Default brand. Replace once brand switcher reads from auth context.
 export const BRAND_ID = 'stelz'
@@ -487,10 +488,38 @@ export async function fbFetchLatestScanRun(brandId = BRAND_ID) {
  * points at the actual cause, and it has now cost two debugging sessions —
  * once on api_projects, once on api_step_stories.
  *
- * So: catch the network-level failure and say what it almost always means.
- * A genuine outage produces the same signature, which is why the wording
- * names both possibilities rather than asserting one.
+ * The first fix GUESSED: it printed "meestal betekent dit dat de functie nog
+ * niet is uitgerold". The third time this fired, that guess was wrong — the
+ * function existed, CORS was fine, and the POST itself had broken off — and
+ * the message sent the debugging in exactly the wrong direction. So now it
+ * MEASURES, with two probes whose behaviour was verified against the real
+ * endpoints (curl, 27 aug):
+ *
+ *   GET on a deployed function   → 405 WITH access-control-allow-origin,
+ *                                  so the browser can read the status.
+ *   GET on a missing function    → 404 WITHOUT the header → TypeError.
+ *   fetch {mode:'no-cors'}       → resolves on ANY server response (404
+ *                                  included), rejects only when the network
+ *                                  itself is down.
+ *
+ * Probe outcomes → verdict is pure (diagnoseUnreachable) so the mapping is
+ * testable without a network.
  */
+/** Two probes, cheapest truth first. Exported only for the wiring; the
+ *  verdict-to-text mapping above is where the tested logic lives. */
+async function probeFunction(url: string): Promise<ProbeOutcome> {
+  try {
+    await fetch(url, { method: 'GET' })
+    return 'readable'
+  } catch { /* geen CORS-headers op het antwoord, of geen netwerk */ }
+  try {
+    await fetch(url, { method: 'GET', mode: 'no-cors' })
+    return 'blocked'
+  } catch {
+    return 'down'
+  }
+}
+
 async function authedFetch(path: string, body: unknown) {
   const user = fbAuth.currentUser
   if (!user) throw new Error('Not signed in')
@@ -506,12 +535,7 @@ async function authedFetch(path: string, body: unknown) {
       body: JSON.stringify(body),
     })
   } catch {
-    throw new Error(
-      `${path} is niet bereikbaar. Meestal betekent dit dat deze functie nog niet ` +
-      `is uitgerold naar productie (een 404 van Cloud Functions komt zonder ` +
-      `CORS-header binnen en leest in de browser als een CORS-fout). ` +
-      `Anders: geen netwerkverbinding.`,
-    )
+    throw new Error(diagnoseUnreachable(path, await probeFunction(`${FUNCTIONS_BASE}/${path}`)))
   }
   if (!res.ok) {
     const text = await res.text()
