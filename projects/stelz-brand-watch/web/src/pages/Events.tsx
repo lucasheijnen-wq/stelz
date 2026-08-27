@@ -83,7 +83,7 @@ function EventRow({ ev, project }: {
   // Firestore rows in production — see lib/eventData). Before this the list
   // could only see the preview fixture, so production showed 0 / 0 / 0 over a
   // fully harvested festival.
-  const { items, detections, preview, loading } = useEventCampaign(ev.id)
+  const { items, detections, preview, sources, loading } = useEventCampaign(ev.id)
   const rows = useMemo(
     () => joinCampaign(items ?? ([] as CampaignItem[]), detections),
     [items, detections],
@@ -125,7 +125,7 @@ function EventRow({ ev, project }: {
                 the banner on the detail page. */}
             {preview && (
               <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 border border-[var(--color-warn)] text-[var(--color-warn)]">
-                lokale data
+                {sources.online > 0 ? 'lokaal + online' : 'lokale data'}
               </span>
             )}
           </div>

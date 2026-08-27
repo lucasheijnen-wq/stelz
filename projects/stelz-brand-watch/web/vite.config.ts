@@ -4,8 +4,11 @@ import tailwindcss from '@tailwindcss/vite'
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { parseByteRange, resolvePreviewMedia } from './preview-paths'
-import { deriveStatus, lockPath, logPath, parseLock, parseRunnerUrl } from './scrape-runner'
+import {
+  authPath, deriveStatus, lockPath, logPath, parseAuthBody, parseLock, parseRunnerUrl,
+} from './scrape-runner'
 
 /** Event ids with a definition on disk — the allow-list both dev plugins
  *  validate browser-sent ids against. Computed HERE, never from the URL. */
@@ -130,6 +133,14 @@ function storyPreview() {
  *                                overwrite each other's fixtures.
  *   GET  /scrape-status/<event>  {running, stale, exitOk, logTail, fixtureMtime}
  *
+ * THE BODY OF /scrape-run CARRIES CREDENTIALS. The round's last step uploads
+ * the harvest to production, and that endpoint is member-gated. The browser is
+ * already signed in as a member, so its refresh token comes along with the
+ * click and is parked at authPath() for step 78 to spend — see scrape-runner.ts
+ * for why a refresh token and not an ID token. Never echoed, never logged; the
+ * response says only whether there were any (`authed`), which is what lets the
+ * button warn "deze ronde blijft lokaal" BEFORE an hour of scraping.
+ *
  * The event id is validated by exact Set membership before it becomes a shell
  * argument or a file name (see scrape-runner.ts for the rules and the tests).
  */
@@ -166,6 +177,43 @@ function scrapeRunner() {
     })
   }
 
+  /** The POST body, capped. A refresh token is ~300 bytes; anything claiming to
+   *  be more than 8 kB of credentials is not one. */
+  const readBody = (req: IncomingMessage): Promise<string> => new Promise((resolve) => {
+    let out = ''
+    req.on('data', (c: Buffer) => { if (out.length < 8192) out += c.toString('utf8') })
+    req.on('end', () => resolve(out.slice(0, 8192)))
+    req.on('error', () => resolve(''))
+  })
+
+  /** Park the round's upload credentials, if the click brought any. What counts
+   *  as a credential is decided by parseAuthBody; this only writes it.
+   *  @returns whether this round will be able to reach production. */
+  const stashAuth = (ev: string, raw: string): boolean => {
+    const creds = parseAuthBody(raw)
+    if (!creds) return false
+    // 0600: it is a password, and .tmp is a directory people poke around in.
+    fs.writeFileSync(authPath(TMP, ev), JSON.stringify(creds), { mode: 0o600 })
+    return true
+  }
+
+  const startRound = async (ev: string, req: IncomingMessage, res: ServerResponse) => {
+    // Body first: an unread request body leaves the socket half-consumed, and
+    // the 409 path would then hang the fetch that is only asking to watch.
+    const raw = await readBody(req)
+    if (statusOf(ev).running) return json(res, 409, { error: 'al bezig' })
+    // A stale lock is a crashed previous round; starting anew replaces it.
+    fs.mkdirSync(TMP, { recursive: true })
+    const authed = stashAuth(ev, raw)
+    const fd = fs.openSync(logPath(TMP, ev), 'w')
+    const child = spawn('bash', [SCRIPT, ev],
+      { cwd: ROOT, detached: true, stdio: ['ignore', fd, fd] })
+    child.unref()
+    fs.closeSync(fd)
+    fs.writeFileSync(lockPath(TMP, ev), String(child.pid))
+    return json(res, 200, { started: true, pid: child.pid, authed })
+  }
+
   return {
     name: 'stelz-scrape-runner',
     apply: 'serve' as const,
@@ -184,22 +232,17 @@ function scrapeRunner() {
           // whole pipeline (bash + whichever python step is underway).
           try { process.kill(-pid, 'SIGTERM') } catch { try { process.kill(pid, 'SIGTERM') } catch { /* al weg */ } }
           fs.rmSync(lockPath(TMP, stopEv), { force: true })
+          // The upload never ran, so its credentials were never spent. A login
+          // secret left on disk after the round it belonged to is exactly the
+          // kind of thing nobody comes back for.
+          fs.rmSync(authPath(TMP, stopEv), { force: true })
           return json(res, 200, { stopped: true })
         }
 
         const runEv = parseRunnerUrl(url, '/scrape-run/', eventIds)
         if (runEv && req.method === 'POST') {
-          const before = statusOf(runEv)
-          if (before.running) return json(res, 409, { error: 'al bezig' })
-          // A stale lock is a crashed previous round; starting anew replaces it.
-          fs.mkdirSync(TMP, { recursive: true })
-          const fd = fs.openSync(logPath(TMP, runEv), 'w')
-          const child = spawn('bash', [SCRIPT, runEv],
-            { cwd: ROOT, detached: true, stdio: ['ignore', fd, fd] })
-          child.unref()
-          fs.closeSync(fd)
-          fs.writeFileSync(lockPath(TMP, runEv), String(child.pid))
-          return json(res, 200, { started: true, pid: child.pid })
+          void startRound(runEv, req, res)
+          return
         }
 
         return next()

@@ -9,6 +9,15 @@
 // this exists: the render site is gated on an inline `import.meta.env.DEV`,
 // and the endpoints are serve-only middleware.
 //
+// THE ROUND NOW ENDS IN PRODUCTION. Step 13 is 78_upload_event.py, which pushes
+// the harvest into the same Firestore collections the live pipeline writes, so
+// a scrape here changes the online dashboard too. That endpoint is member-gated,
+// and this button is what supplies the credentials: the browser is already
+// signed in, so its REFRESH token rides along with the start request and the
+// upload step exchanges it for a fresh ID token an hour later if it has to.
+// Signed out, the round still runs — it just stays on this machine, and the
+// caption says so up front rather than after fifty minutes of scraping.
+//
 // THE ONE RULE, learned from the first user test: a broken round must never
 // look like a successful one. The runner script deliberately keeps going after
 // a failed step, so "the process exited" proves nothing — this component reads
@@ -22,6 +31,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Button } from './ui'
+import { fbApp, fbAuth } from '../lib/firebase'
 
 type ScrapeStatus = {
   running: boolean
@@ -52,6 +62,8 @@ export function ScrapeButton({ eventId }: { eventId: string }) {
   /** The status a round WE watched ended on, when it did not end cleanly. */
   const [failedRun, setFailedRun] = useState<ScrapeStatus | null>(null)
   const [stopped, setStopped] = useState(false)
+  /** Null until a round is started here; false = it will not reach production. */
+  const [authed, setAuthed] = useState<boolean | null>(null)
   // Poll generation: bumped after a successful start so the effect re-arms.
   const [gen, setGen] = useState(0)
   // Only the tab that pressed the button reloads itself when the round ends —
@@ -125,8 +137,20 @@ export function ScrapeButton({ eventId }: { eventId: string }) {
     setError(null)
     setFailedRun(null)
     setStopped(false)
+    setAuthed(null)
     try {
-      const r = await fetch(`/scrape-run/${eventId}`, { method: 'POST' })
+      // The upload step's credentials. A REFRESH token, because the round can
+      // take an hour and an ID token cannot — see scrape-runner.authPath. The
+      // apiKey travels with it so the tool has one source for it rather than a
+      // second hard-coded copy that can drift from lib/firebase.
+      const user = fbAuth.currentUser
+      const r = await fetch(`/scrape-run/${eventId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(user
+          ? { refreshToken: user.refreshToken, apiKey: fbApp.options.apiKey }
+          : {}),
+      })
       if (r.status === 409) {
         // A round is already underway — watch it instead of sulking about it.
         startedHere.current = true
@@ -135,6 +159,8 @@ export function ScrapeButton({ eventId }: { eventId: string }) {
       } else if (!r.ok) {
         setError(`Starten mislukte (HTTP ${r.status}).`)
       } else {
+        const body = (await r.json().catch(() => ({}))) as { authed?: boolean }
+        setAuthed(body.authed === true)
         startedHere.current = true
         activeRef.current = true
         setGen((g) => g + 1)
@@ -150,6 +176,7 @@ export function ScrapeButton({ eventId }: { eventId: string }) {
       await fetch(`/scrape-stop/${eventId}`, { method: 'POST' })
       startedHere.current = false
       activeRef.current = false
+      setAuthed(null)
       setStopped(true)
       setGen((g) => g + 1)
     } catch { /* status-poll laat vanzelf zien of het lukte */ }
@@ -177,7 +204,7 @@ export function ScrapeButton({ eventId }: { eventId: string }) {
                 ? `Laatste scrape: ${fmtWhen(status.fixtureMtime)}`
                 : 'Nog nooit gescraped op deze computer'
 
-  const warnTone = Boolean(error || failedRun || status?.stale)
+  const warnTone = Boolean(error || failedRun || status?.stale || authed === false)
 
   return (
     <span className="inline-flex flex-col items-end gap-0.5 max-w-[340px]">
@@ -194,15 +221,22 @@ export function ScrapeButton({ eventId }: { eventId: string }) {
           disabled={busy}
           onClick={() => { void start() }}
           title={'Draait de lokale pijplijn: stories, TikTok, Instagram en discovery, '
-            + 'daarna de analyse. Scrapen ≈ $0,45; de analyse kost alleen iets bij '
-            + 'nieuwe posts (na een druk festivalweekend een paar dollar). '
-            + 'Duurt 10 minuten tot een uur.'}
+            + 'daarna de analyse, en uploadt het resultaat naar de online database. '
+            + 'Scrapen ≈ $0,45; de analyse kost alleen iets bij nieuwe posts (na een '
+            + 'druk festivalweekend een paar dollar). Duurt 10 minuten tot een uur.'
+            + (fbAuth.currentUser ? '' : ' Je bent niet ingelogd: deze ronde blijft lokaal.')}
         >
           {starting ? 'Starten…' : status?.running ? 'Scrape loopt…' : 'Opnieuw scrapen'}
         </Button>
       </span>
       <span className={`text-[10px] text-right ${warnTone ? 'text-[var(--color-warn)]' : 'text-[var(--color-ink-subtle)]'}`}>
         {caption}
+        {/* Said WHILE it runs, not after. A round is ten minutes to an hour;
+            finding out at the end that none of it left this machine is the
+            expensive way to learn you were signed out. */}
+        {authed === false && busy && (
+          <> — niet ingelogd, dus deze ronde blijft lokaal</>
+        )}
         {failedRun && (
           <>
             {' — '}

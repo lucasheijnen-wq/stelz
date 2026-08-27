@@ -107,10 +107,12 @@ function EventBody({ ev, params, setParams }: {
   const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState<CampaignRow | null>(null)
 
-  // Preview in dev, the imported Firestore rows in production — one hook,
-  // same downstream pipeline either way. See lib/eventData.
+  // EVERYTHING WE HAVE, from both places at once: the local scrape fixtures on
+  // this machine and the Firestore rows — imported ones and whatever the
+  // scheduled cloud scans wrote inside this event's window. One hook, one
+  // merged set, same downstream pipeline. See lib/eventData.
   const { items: campaignItems, detections: campaignDetections,
-          preview, loading: campaignLoading } = useEventCampaign(ev.id)
+          sources, preview, loading: campaignLoading } = useEventCampaign(ev.id)
   const audience = useEventAudience(ev.id)
 
   useEffect(() => {
@@ -228,11 +230,29 @@ function EventBody({ ev, params, setParams }: {
         </>
       }
     >
+      {/* WHICH ROWS CAME FROM WHERE. The page merges the local scrape with the
+          online database, so "lokale data" as a blanket label would be wrong
+          the moment both have rows — and the counts are the only way a reader
+          can tell whether what they are looking at survives a deploy. */}
       {preview && (
-        <Card className="mb-4 px-4 py-2.5 text-[12px] text-[var(--color-warn)]">
-          Lokale data: rechtstreeks van de laatste scrape op deze computer, nog niet
-          uit de online database. De oordelen komen uit de lokale analyse met hetzelfde
-          model en dezelfde referentiefoto's als productie.
+        <Card className="mb-4 px-4 py-2.5 text-[12px] text-[var(--color-warn)] leading-relaxed">
+          {sources.online > 0 ? (
+            <>
+              <strong className="font-medium">
+                {fmtNum(sources.local)} van deze rijen komen van de laatste scrape op
+                deze computer, {fmtNum(sources.online)} uit de online database.
+              </strong>{' '}
+              Samengevoegd; een post die in allebei staat telt één keer, met het lokale
+              oordeel — dat is op archiefresolutie gemaakt en de online analyse op 512
+              pixels, dus andersom zou een treffer bij het verversen weer een misser
+              worden.
+            </>
+          ) : (
+            <>Lokale data: rechtstreeks van de laatste scrape op deze computer, nog niet
+            uit de online database.</>
+          )}{' '}
+          De lokale oordelen komen uit dezelfde analyse met hetzelfde model en dezelfde
+          referentiefoto&apos;s als productie.
         </Card>
       )}
 
@@ -260,8 +280,10 @@ function EventBody({ ev, params, setParams }: {
           {formatWindow(ev)}.
         </strong>{' '}
         {outside > 0 && (
-          <>De overige {fmtNum(outside)} zijn ouder of nieuwer — echte posts van dezelfde
-          creators, maar geen {ev.name}. De archieven gaan jaren terug; zonder deze grens
+          <>De overige {fmtNum(outside)} vallen erbuiten: ouder of nieuwer, of wél uit
+          deze dagen maar van accounts die niets met {ev.name} te maken hebben — de
+          dagelijkse scan haalt alles binnen wat het merk noemt, en dat is lang niet
+          allemaal festival. De archieven gaan bovendien jaren terug; zonder deze grens
           telt een festivalpagina alles mee wat er toevallig in staat.{' '}</>
         )}
         <button
@@ -605,10 +627,17 @@ function SettingsTab({ ev, project, canWrite, onChanged }: {
           In het <strong className="text-[var(--color-ink)]">lokale dashboard</strong> (waar de
           scrapers draaien) zit rechtsboven de knop{' '}
           <strong className="text-[var(--color-ink)]">Opnieuw scrapen</strong>: alle vier de
-          archieven verversen, alles nieuws beoordelen, en het dashboard bijwerken. Voortgang
-          staat onder de knop; het volledige log in{' '}
-          <code className="text-[11px]">.tmp/scrape-{ev.id}.log</code>. Stories verdwijnen na
+          archieven verversen, alles nieuws beoordelen, het dashboard bijwerken, en het
+          resultaat naar de online database uploaden — die laatste stap is waarom een scrape
+          hier ook de online pagina verandert. Voortgang staat onder de knop; het volledige log
+          in <code className="text-[11px]">.tmp/scrape-{ev.id}.log</code>. Stories verdwijnen na
           24 uur en komen nooit terug — die stap is de enige die haast heeft.
+        </p>
+        <p className="text-[12px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mb-3">
+          Uploaden vereist dat je hier ingelogd bent als member: je sessie gaat mee met de klik
+          en wordt vlak vóór het uploaden ingewisseld voor een vers token, zodat ook een ronde
+          van een uur nog mag schrijven. Ben je niet ingelogd, dan meldt de knop dat meteen en
+          blijft de ronde lokaal — de oogst zelf gaat gewoon door.
         </p>
         <p className="text-[12px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mb-3">
           Handmatig kan ook; dit is exact wat de knop uitvoert:
@@ -618,13 +647,16 @@ function SettingsTab({ ev, project, canWrite, onChanged }: {
 
 # = 62_stories → 70_tiktok → 71_ig_posts (--per-handle 4, laatste 7 dagen)
 #   → 73_discovery → 74_analyse ×4 (--max-dim 0, verplicht)
-#   → 72_campaign_fixture → 76_audience → 61_stories_preview → 77_voortgang`}
+#   → 72_campaign_fixture → 76_audience → 61_stories_preview → 77_voortgang
+#   → 78_upload_event (--if-authed)`}
         </pre>
         <p className="text-[11px] text-[var(--color-ink-subtle)] leading-relaxed max-w-2xl mt-3">
-          De laatste vier stappen zijn wat het scherm ververst — losse scrapes zonder die
-          stappen laten de pagina ongewijzigd. <code>--max-dim 0</code> is in het script
-          vastgezet: de standaard is 512 en een gemengd archief lijkt op een merk dat minder
-          zichtbaar werd.
+          De laatste vijf stappen zijn wat het scherm ververst — losse scrapes zonder die
+          stappen laten de pagina ongewijzigd, en zonder de laatste blijft alles op deze
+          computer staan. <code>--max-dim 0</code> is in het script vastgezet: de standaard is
+          512 en een gemengd archief lijkt op een merk dat minder zichtbaar werd.
+          <code>--if-authed</code> laat de uploadstap zichzelf overslaan als niemand is
+          ingelogd, zodat handmatig draaien geen ronde als mislukt markeert.
         </p>
       </Card>
 
@@ -675,18 +707,20 @@ function EmptyState({ ev }: { ev: StelzEvent }) {
     <Card className="p-12 text-center">
       <p className="text-[13px] text-[var(--color-ink-muted)] mb-2">Nog geen data voor {ev.name}.</p>
       <p className="text-[12px] text-[var(--color-ink-subtle)] max-w-[520px] mx-auto leading-relaxed">
-        Deze pagina toont Instagram-stories, Instagram-posts en TikToks naast elkaar. Zolang de
-        scans niet zijn uitgerold, wordt hij gevuld met{' '}
-        <code className="text-[11px]">72_campaign_fixture.py --event {ev.id}</code>.
+        Deze pagina toont Instagram-stories, Instagram-posts en TikToks naast elkaar, uit twee
+        bronnen tegelijk: de laatste scrape op deze computer en de online database — dat laatste
+        is zowel wat er geüpload is als wat de dagelijkse scan zelf binnen {formatWindow(ev)}{' '}
+        heeft opgehaald. Dit scherm betekent dus dat ze allebei leeg zijn, niet dat er één
+        ontbreekt.
       </p>
-      {/* Dev server only — folded out of a production build. Local data shows
-          automatically now (no query parameter); an empty page here means no
-          scrape ever ran on this machine, and the button is the way out. */}
+      {/* Dev server only — folded out of a production build. Both sources load
+          automatically now, so reaching this card in dev means neither has
+          anything and the button is the way out. */}
       {import.meta.env.DEV && (
         <p className="mt-4 text-[12px] text-[var(--color-ink-subtle)]">
-          Op deze computer nog niets gescraped — gebruik{' '}
+          Gebruik{' '}
           <strong className="font-medium text-[var(--color-ink)]">Opnieuw scrapen</strong>{' '}
-          rechtsboven om de eerste ronde te draaien.
+          rechtsboven om de eerste ronde te draaien; die vult meteen ook de online database.
         </p>
       )}
     </Card>

@@ -55,8 +55,14 @@ export const FAILED_MARKER = ' faalde — '
 
 const TAIL_LINES = 15
 
-/** The 12 steps of 79_verversronde.sh, in order, keyed by their "→" log line.
- *  The labels are what a person waiting at the button gets to read. */
+/** The 13 steps of 79_verversronde.sh, in order, keyed by their "→" log line.
+ *  The labels are what a person waiting at the button gets to read.
+ *
+ *  ADDING A STEP TO THE RUNNER MEANS ADDING IT HERE. A step the list does not
+ *  know is invisible: the caption freezes on the previous one and the button
+ *  reads as hung for however long the unknown step takes. The upload is the
+ *  slowest tail step there is on a first run (~76 MB of hit images), so it is
+ *  exactly the one that must not be missing. */
 const STEPS: { match: RegExp; label: string }[] = [
   { match: /→ 62_stories_archive\.py/, label: 'stories ophalen' },
   { match: /→ 70_tiktok_archive\.py/, label: 'TikTok-roster ophalen' },
@@ -70,6 +76,7 @@ const STEPS: { match: RegExp; label: string }[] = [
   { match: /→ 76_audience\.py/, label: 'publiek bijwerken' },
   { match: /→ 61_stories_preview_fixture\.py/, label: 'stories-weergave bijwerken' },
   { match: /→ 77_voortgang\.py/, label: 'tellers bijwerken' },
+  { match: /→ 78_upload_event\.py/, label: 'naar productie uploaden' },
 ]
 
 /** The harvesters report their yield in three different spellings — this is
@@ -109,6 +116,45 @@ export function lockPath(tmp: string, eventId: string): string {
 /** `.tmp/scrape-<event>.log` — stdout+stderr of the running round. */
 export function logPath(tmp: string, eventId: string): string {
   return `${tmp}/scrape-${eventId}.log`
+}
+
+/** The upload credentials a /scrape-run body carries, or null if it carries
+ *  none usable. Pure, and here rather than in the plugin for the reason at the
+ *  top of this file: the request body comes from a browser, and deciding what
+ *  counts as a credential is exactly the kind of thing that should be testable
+ *  without a disk.
+ *
+ *  Null is NOT an error. Signing in is optional — the harvest is the valuable
+ *  half of a round and it works signed out. Null simply means this round stays
+ *  on this machine, which the response reports so the button can say so. */
+export function parseAuthBody(raw: string): { refreshToken: string; apiKey: string } | null {
+  let body: unknown
+  try {
+    body = JSON.parse(raw || '{}')
+  } catch {
+    return null
+  }
+  if (!body || typeof body !== 'object') return null
+  const { refreshToken, apiKey } = body as Record<string, unknown>
+  if (typeof refreshToken !== 'string' || !refreshToken) return null
+  if (typeof apiKey !== 'string' || !apiKey) return null
+  return { refreshToken, apiKey }
+}
+
+/** `.tmp/scrape-auth-<event>.json` — the round's credentials for its upload
+ *  step, handed over by the browser at the click and burned by 78 on success.
+ *
+ *  A REFRESH token, not an ID token, and that is the whole design. An ID token
+ *  lives about an hour; a round runs ten minutes to an hour, so a token handed
+ *  over at the start would be dead by the upload on exactly the busy days when
+ *  there is most to upload. The refresh token is exchanged for a fresh one
+ *  immediately before the upload instead.
+ *
+ *  It is therefore a long-lived login secret sitting in a file. It goes to
+ *  .tmp/ (gitignored), mode 0600, is overwritten at every start, removed on
+ *  stop, and deleted by 78 once the upload lands. It must never be logged. */
+export function authPath(tmp: string, eventId: string): string {
+  return `${tmp}/scrape-auth-${eventId}.json`
 }
 
 /** The pid a lock file names, or null when the content is not one. */

@@ -10,7 +10,7 @@
 //                    bought reach into organic reach.
 import { describe, expect, it } from 'vitest'
 import {
-  matchEvent, evidencedHandlesFor, eventWindow, inWindow, eventStatus, rosterAccounts, identityMap,
+  matchEvent, evidencedHandlesFor, eventWindow, inWindow, dayBounds, eventStatus, rosterAccounts, identityMap,
   nameMap, orderedTags, formatWindow, bookingFor, type Attributable,
 } from './events'
 import { EVENTS, getEvent, type StelzEvent } from '../data/events'
@@ -301,5 +301,34 @@ describe('bookingFor', () => {
 
   it('names the event, so the page can say which one', () => {
     expect(bookingFor(LL.roster[0].instagram)?.event.id).toBe(LL.id)
+  })
+})
+
+// dayBounds is what a timestamp range query sends to Firestore, and inWindow is
+// what the page then applies to the rows that come back. If the two disagree the
+// fetch is wrong at both edges at once: it drags in posts the page discards, and
+// drops posts the page would have kept. So the test is not "the bounds look
+// right" but "the bounds agree with inWindow".
+describe('dayBounds', () => {
+  it('covers the whole first and last day in UTC', () => {
+    const [from, to] = dayBounds({ start: '2026-08-17', end: '2026-08-30' })
+    expect(from.toISOString()).toBe('2026-08-17T00:00:00.000Z')
+    expect(to.toISOString()).toBe('2026-08-30T23:59:59.999Z')
+  })
+
+  it('agrees with inWindow at both edges', () => {
+    const win = eventWindow(LL)
+    const [from, to] = dayBounds(win)
+    // Anything the query would return is in window...
+    expect(inWindow(LL, from.toISOString())).toBe(true)
+    expect(inWindow(LL, to.toISOString())).toBe(true)
+    // ...and the instants just outside it are not.
+    expect(inWindow(LL, new Date(from.getTime() - 1).toISOString())).toBe(false)
+    expect(inWindow(LL, new Date(to.getTime() + 1).toISOString())).toBe(false)
+  })
+
+  it('holds for a single-day window', () => {
+    const [from, to] = dayBounds({ start: '2026-08-20', end: '2026-08-20' })
+    expect(to.getTime() - from.getTime()).toBe(86_400_000 - 1)
   })
 })

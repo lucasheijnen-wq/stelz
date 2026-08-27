@@ -18,12 +18,15 @@ import {
   type Unsubscribe,
   type QueryConstraint,
   type QueryDocumentSnapshot,
+  type QuerySnapshot,
+  type CollectionReference,
   type DocumentData,
 } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
 import { fbDb, fbAuth, fbStorage } from './firebase'
 import type { DetectionRow, ResonanceRow } from './types'
-import type { CampaignItem } from './campaign'
+import { surfaceOf, type CampaignItem } from './campaign'
+import { dayBounds } from './events'
 import type { Audience } from './audience'
 import { spendBreakdown, type SpendLine } from './costs'
 
@@ -1250,19 +1253,41 @@ export async function fbMarkAllInboxRead(items: InboxItem[]) {
   )
 }
 
-// ────────────── Imported events (posts/detections carrying eventId) ──────────────
+// ────────────── Event data: the label AND the window ──────────────
 //
-// The event pages' LIVE data path. Locally they read dev-server preview
-// fixtures; in production those don't exist, and until this fetcher the pages
-// said "Nog geen data" over a fully harvested campaign. The rows come from
-// 78_upload_event.py via api_import_event and live in the same
-// posts/detections collections as everything else, marked with an eventId.
+// The event pages' live data path, and the reason a scan nobody aimed at an
+// event can still land on its page.
 //
-// Cached per eventId for the tab's lifetime: the Lowlands set is ~5K docs, and
-// the events LIST page and the event DETAIL page would otherwise each pay that
-// read bill on every visit.
+// TWO QUERIES, UNIONED, because the collections hold two kinds of event row and
+// neither one alone is the event:
+//
+//   1. `eventId` — what 78_upload_event.py pushed. Explicitly labelled, and the
+//      only rows that can be UNDATED: matchEvent rule 3 lets a roster creator's
+//      undated post through, so something has to carry it, and a range query on
+//      postedAt never will.
+//   2. THE WINDOW — every post written inside the event's period, whoever wrote
+//      it. scheduled_daily_scan and scheduled_stories run on their own clock
+//      through scan_creators/scan_hashtags/scan_stories, and those handlers
+//      know nothing about events: `grep eventId firebase/functions` hits
+//      import_event.py and nothing else. Before this query their output could
+//      not appear on an event page however festival it was — the page asked for
+//      a label only one manual uploader ever wrote.
+//
+// ATTRIBUTION IS NOT TAKEN FROM EITHER QUERY. Both feed the same
+// matchEvent/evidencedHandlesFor pass in Event.tsx, which decides membership
+// from the roster, the window and the tags. `eventId` is a way to FIND rows
+// here, never a claim about them — the same rule the rest of the page follows,
+// and the reason widening the net cannot inflate a number: a scanned post that
+// is not this event is fetched, judged not-this-event, and dropped.
+//
+// Cached per event AND window for the tab's lifetime: the Lowlands set is ~5K
+// docs, and the events LIST page and the event DETAIL page would otherwise each
+// pay that read bill on every visit.
 
 export type EventCampaign = { items: CampaignItem[]; detections: DetectionRow[] }
+
+/** Both bounds inclusive, both 'YYYY-MM-DD' — see lib/events.eventWindow. */
+export type EventRange = { start: string; end: string }
 
 const eventCampaignCache = new Map<string, Promise<EventCampaign>>()
 
@@ -1271,13 +1296,15 @@ function mapEventPost(d: QueryDocumentSnapshot<DocumentData>): CampaignItem {
   return {
     itemId: (x.itemId as string) ?? d.id,
     platform: (x.platform as CampaignItem['platform']) ?? 'instagram',
-    surface: (x.surface as CampaignItem['surface']) ?? 'post',
+    surface: surfaceOf(x),
     creatorHandle: (x.creatorHandle as string) ?? '',
     platformHandle: (x.platformHandle as string | undefined) ?? undefined,
     url: (x.url as string | null) ?? null,
     coverUrl: (x.coverUrl as string | null) ?? null,
     videoUrl: (x.videoUrl as string | null) ?? null,
-    mediaType: (x.mediaType as CampaignItem['mediaType']) ?? 'image',
+    // Same story as the surface: the scanners write contentType, not mediaType.
+    mediaType: (x.mediaType as CampaignItem['mediaType'])
+      ?? (x.contentType === 'video' || x.videoUrl ? 'video' : 'image'),
     postedAt: tsToIso(x.postedAt),
     caption: (x.caption as string | null) ?? null,
     hashtags: (x.hashtags as string[]) ?? [],
@@ -1299,30 +1326,64 @@ function mapEventPost(d: QueryDocumentSnapshot<DocumentData>): CampaignItem {
   }
 }
 
-export function fbFetchEventCampaign(eventId: string, brandId = BRAND_ID): Promise<EventCampaign> {
-  const cached = eventCampaignCache.get(eventId)
+/** Doc id wins over query, so a row found by BOTH queries is one row. */
+function dedupeDocs(
+  ...snaps: (QuerySnapshot<DocumentData> | null)[]
+): QueryDocumentSnapshot<DocumentData>[] {
+  const out = new Map<string, QueryDocumentSnapshot<DocumentData>>()
+  for (const snap of snaps) for (const d of snap?.docs ?? []) out.set(d.id, d)
+  return [...out.values()]
+}
+
+export function fbFetchEventCampaign(
+  eventId: string,
+  /** Null means "labelled rows only" — a caller without an event definition. */
+  range: EventRange | null = null,
+  brandId = BRAND_ID,
+): Promise<EventCampaign> {
+  const key = `${brandId}|${eventId}|${range ? `${range.start}..${range.end}` : '-'}`
+  const cached = eventCampaignCache.get(key)
   if (cached) return cached
   const p = (async () => {
-    const [postSnap, detSnap] = await Promise.all([
-      getDocs(query(collection(fbDb, 'brands', brandId, 'posts'),
-        where('eventId', '==', eventId), fsLimit(8000))),
-      getDocs(query(collection(fbDb, 'brands', brandId, 'detections'),
-        where('eventId', '==', eventId), fsLimit(8000))),
+    const postsCol = collection(fbDb, 'brands', brandId, 'posts')
+    const detsCol = collection(fbDb, 'brands', brandId, 'detections')
+    const bounds = range ? dayBounds(range) : null
+
+    const labelled = (c: CollectionReference<DocumentData>) =>
+      getDocs(query(c, where('eventId', '==', eventId), fsLimit(8000)))
+    // A window query that fails — a missing index, a rules change — must not
+    // take the labelled rows down with it. Losing half the rows is bad; going
+    // from "less than everything" to "Nog geen data" is the failure this whole
+    // fetcher exists to prevent.
+    const windowed = (c: CollectionReference<DocumentData>) =>
+      bounds
+        ? getDocs(query(c,
+            where('postedAt', '>=', Timestamp.fromDate(bounds[0])),
+            where('postedAt', '<=', Timestamp.fromDate(bounds[1])),
+            fsLimit(8000))).catch(() => null)
+        : Promise.resolve(null)
+
+    const [labelPosts, labelDets, winPosts, winDets] = await Promise.all([
+      labelled(postsCol), labelled(detsCol),
+      windowed(postsCol), windowed(detsCol),
     ])
-    const items = postSnap.docs.map(mapEventPost)
-    const detections = detSnap.docs.map((d) => {
+
+    const items = dedupeDocs(labelPosts, winPosts).map(mapEventPost)
+    const detections = dedupeDocs(labelDets, winDets).map((d) => {
       const row = mapDetection(d, brandId)
       // The event join runs on the fixture-era item id, preserved as itemId on
       // the doc; postId keeps the production shape for the live feed's
-      // parentPostKey collapse. Both name the same post.
+      // parentPostKey collapse. Both name the same post. A scanner-written
+      // detection has no itemId and its postId IS the post's doc id, which is
+      // what mapEventPost falls back to — so the join holds on both paths.
       const itemId = (d.data().itemId as string | null) ?? row.post_id
       return { ...row, post_id: itemId }
     })
     return { items, detections }
   })()
   // A failed fetch must not be cached as "the event is empty".
-  p.catch(() => eventCampaignCache.delete(eventId))
-  eventCampaignCache.set(eventId, p)
+  p.catch(() => eventCampaignCache.delete(key))
+  eventCampaignCache.set(key, p)
   return p
 }
 

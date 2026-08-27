@@ -5,7 +5,8 @@
 // plugin, exactly like preview-paths.ts and its middleware.
 import { describe, expect, it } from 'vitest'
 import {
-  DONE_MARKER, deriveStatus, lockPath, logPath, parseLock, parseRunnerUrl,
+  DONE_MARKER, authPath, deriveStatus, lockPath, logPath, parseAuthBody, parseLock,
+  parseRunnerUrl,
 } from '../../scrape-runner'
 
 const events = new Set(['lowlands-2026', 'pinkpop-2027'])
@@ -134,8 +135,123 @@ describe('deriveStatus', () => {
       '[t] → 74_analyse.py --event lowlands-2026 --archive ig-posts --max-dim 0',
     ].join('\n')
     const s = deriveStatus({ ...base, lockPid: 9, pidAlive: true, logText: log })
-    expect(s.currentStep).toEqual({ index: 7, total: 12, label: 'analyse: Instagram-posts' })
+    expect(s.currentStep).toEqual({ index: 7, total: 13, label: 'analyse: Instagram-posts' })
     expect(s.lastLine).toContain('74_analyse.py')
     expect(deriveStatus(base).currentStep).toBeNull()
+  })
+})
+
+// THE LIST AND THE SCRIPT MUST NOT DRIFT.
+//
+// deriveStatus recognises a step by matching its "→ script" log line against a
+// hard-coded list. A step added to the runner and not to the list is invisible:
+// the caption freezes on the step before it and the button reads as hung for
+// however long the new step takes. That is not hypothetical — the upload step
+// was added to the runner in this change set, and on a first run it is the
+// slowest step in the round.
+//
+// So rather than asserting a number, this reads the actual shell script and
+// asserts the list covers every step it runs, in the same order.
+const RUNNER = import.meta.glob('../../../../../tools/stelz_brand_watch/79_verversronde.sh', {
+  query: '?raw', import: 'default', eager: true,
+}) as Record<string, string>
+
+describe('the step list matches 79_verversronde.sh', () => {
+  const script = Object.values(RUNNER)[0]
+
+  it('finds the runner script at all', () => {
+    expect(script, 'runner script not found — has it moved?').toBeTruthy()
+  })
+
+  it('recognises every step the script runs, in order', () => {
+    // The analysis step is INDENTED inside `for archief in …; do`, so it is one
+    // line in the file and four steps in the round. Expanding it here is the
+    // difference between testing the script and testing a regex — the first
+    // version of this test matched at column 0, found 9 of 13, and passed a
+    // total that agreed with nothing.
+    const loop = script.match(/for archief in ([^;]+); do/)
+    const archives = (loop?.[1] ?? '').trim().split(/\s+/).filter(Boolean)
+    expect(archives, 'the archive loop is gone or reshaped').toHaveLength(4)
+
+    const invocations = [...script.matchAll(/^[ \t]*step (\S+\.py)(.*)$/gm)]
+      .flatMap((m) => (m[2].includes('"$archief"')
+        ? archives.map((a) => m[2].replace('"$archief"', a))
+        : [m[2]]).map((tail) => `[2026-08-25T14:00:00] → ${m[1]}${tail}`))
+    expect(invocations.length, 'no step lines parsed out of the script')
+      .toBeGreaterThan(10)
+
+    const log = [
+      '[2026-08-25T13:59:00] verversronde start — lowlands-2026',
+      ...invocations,
+    ].join('\n')
+    const s = deriveStatus({
+      lockPid: 4242, pidAlive: true, logText: log, fixtureMtime: null,
+    })
+
+    // The LAST step the script runs must be the LAST step the list knows, and
+    // the totals must agree: that is true only when the list covers all of them.
+    expect(s.currentStep).not.toBeNull()
+    expect(s.currentStep!.total).toBe(invocations.length)
+    expect(s.currentStep!.index).toBe(invocations.length)
+  })
+
+  it('names the upload step, so the round can be watched to the end', () => {
+    const s = deriveStatus({
+      lockPid: 1, pidAlive: true, fixtureMtime: null,
+      logText: '[2026-08-25T14:00:00] → 78_upload_event.py --event lowlands-2026 --if-authed',
+    })
+    expect(s.currentStep?.label).toBe('naar productie uploaden')
+  })
+})
+
+// The round's last step uploads to production, and the credentials for it come
+// out of a request body a browser sent. Two things have to hold: a body that
+// does not carry a real credential yields null rather than something that gets
+// written to disk as one, and null is treated as "this round stays local"
+// rather than as a failure — signing in is optional, the harvest is not.
+describe('parseAuthBody', () => {
+  it('takes a well-formed pair', () => {
+    expect(parseAuthBody('{"refreshToken":"rt-abc","apiKey":"AIza-xyz"}'))
+      .toEqual({ refreshToken: 'rt-abc', apiKey: 'AIza-xyz' })
+  })
+
+  it('drops everything to null rather than half a credential', () => {
+    // A signed-out click: the button posts {} on purpose.
+    expect(parseAuthBody('{}')).toBeNull()
+    expect(parseAuthBody('')).toBeNull()
+    // Half a pair is not a credential — 78 would fail on it a scrape later.
+    expect(parseAuthBody('{"refreshToken":"rt-abc"}')).toBeNull()
+    expect(parseAuthBody('{"apiKey":"AIza-xyz"}')).toBeNull()
+    // Empty strings are present-but-useless, and read as truthy to a naive check.
+    expect(parseAuthBody('{"refreshToken":"","apiKey":"AIza-xyz"}')).toBeNull()
+    expect(parseAuthBody('{"refreshToken":"rt-abc","apiKey":""}')).toBeNull()
+  })
+
+  it('survives a body that is not what it claims', () => {
+    expect(parseAuthBody('not json at all')).toBeNull()
+    expect(parseAuthBody('null')).toBeNull()
+    expect(parseAuthBody('[1,2,3]')).toBeNull()
+    expect(parseAuthBody('{"refreshToken":42,"apiKey":"AIza-xyz"}')).toBeNull()
+  })
+
+  it('ignores anything else the body carries', () => {
+    // Extra fields are not a reason to refuse; only the two matter.
+    expect(parseAuthBody('{"refreshToken":"r","apiKey":"k","uid":"u","evil":true}'))
+      .toEqual({ refreshToken: 'r', apiKey: 'k' })
+  })
+})
+
+describe('authPath', () => {
+  it('is the file 78_upload_event.py looks for by default', () => {
+    // The tool builds this name independently (token_file_for). If either side
+    // is renamed alone the upload silently never authenticates, and the round
+    // reports a clean, local-only success — the exact failure mode this whole
+    // change set exists to remove.
+    expect(authPath('/x/.tmp', 'lowlands-2026')).toBe('/x/.tmp/scrape-auth-lowlands-2026.json')
+  })
+
+  it('sits beside the round it belongs to', () => {
+    expect(authPath('/x/.tmp', 'lowlands-2026')).not.toBe(lockPath('/x/.tmp', 'lowlands-2026'))
+    expect(authPath('/x/.tmp', 'lowlands-2026')).not.toBe(logPath('/x/.tmp', 'lowlands-2026'))
   })
 })

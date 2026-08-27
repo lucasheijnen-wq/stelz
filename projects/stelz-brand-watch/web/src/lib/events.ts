@@ -72,6 +72,19 @@ export function eventWindow(ev: StelzEvent): { start: string; end: string } {
   return d.window
 }
 
+/** UTC day bounds for a window, for a range query against stored timestamps.
+ *
+ *  `inWindow` above compares the ISO date PREFIX of postedAt, and that prefix is
+ *  UTC. So a fetch that selects rows by timestamp has to use UTC bounds too, or
+ *  the two rules disagree by up to two hours at each edge — the fetch drags in
+ *  posts the page then silently discards, and drops posts it would have kept. */
+export function dayBounds(range: { start: string; end: string }): [Date, Date] {
+  return [
+    new Date(`${range.start}T00:00:00.000Z`),
+    new Date(`${range.end}T23:59:59.999Z`),
+  ]
+}
+
 /** Human-readable window, e.g. "17 – 30 aug". */
 export function formatWindow(ev: StelzEvent): string {
   const { start, end } = eventWindow(ev)

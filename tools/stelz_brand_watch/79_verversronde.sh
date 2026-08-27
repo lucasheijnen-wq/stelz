@@ -65,6 +65,18 @@ step 76_audience.py --event "$EVENT"
 step 61_stories_preview_fixture.py
 step 77_voortgang.py --event "$EVENT"
 
+# NAAR PRODUCTIE. Zonder deze stap bleef elke ronde op deze computer staan: de
+# fixtures werden bijgewerkt, het lokale dashboard liet het zien, en de online
+# evenementpagina veranderde nooit — 78 bestond wel, maar moest met de hand
+# worden gedraaid met een zelf geplakt ID-token, dus dat gebeurde niet.
+#
+# --if-authed: geen inloggegevens is geen fout. De knop legt ze klaar in
+# .tmp/scrape-auth-<event>.json; draait iemand dit script met de hand zonder in
+# te loggen, dan slaat de stap zichzelf over met exit 0 en blijft de ronde
+# "schoon". Een ECHTE uploadfout geeft wel een nette non-zero en kleurt de knop
+# rood — dat is precies het verschil dat we willen zien.
+step 78_upload_event.py --event "$EVENT" --if-authed
+
 # De statusafleiding in web/scrape-runner.ts herkent een geslaagde ronde aan
 # precies deze regel — herformuleren betekent dáár ook aanpassen.
 echo "[$(date +%FT%T)] verversronde klaar"
