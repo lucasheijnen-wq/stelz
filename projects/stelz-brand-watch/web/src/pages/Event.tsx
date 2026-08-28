@@ -248,7 +248,13 @@ function EventBody({ ev, params, setParams }: {
           {/* TWO BUTTONS, TWO PIPELINES — see components/EventScanButton for
               why they are not one. This one calls the Cloud Functions, so it is
               the button that exists in production and works from any machine. */}
-          <EventScanButton scan={scan} project={project} canWrite={canWrite} loading={loading} />
+          <EventScanButton
+            scan={scan}
+            project={project}
+            canWrite={canWrite}
+            loading={loading}
+            eventTags={ev.hashtags.map((h) => h.tag)}
+          />
           {/* Dev server only — the LOCAL pipeline lives on this machine, and
               the endpoints behind that button exist only in `vite dev`. Inline
               DEV gate so the build folds the whole render site away. */}

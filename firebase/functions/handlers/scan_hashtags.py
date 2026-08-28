@@ -103,10 +103,50 @@ def _is_brand_specific_tag(tag: str, brand_slug: str, aliases: list[str] | None 
     return any(n and n in t for n in needles)
 
 
-def publish_tags(brand_id: str, per_tag: int = 500, max_tags: int = 50) -> dict[str, Any]:
+class _PlainTag:
+    """A hashtag that came from a caller rather than from the pool.
+
+    Everything downstream expects a Firestore snapshot, so this is the smallest
+    thing that behaves like one. `family` is set to brand_core because that is
+    what an explicitly requested tag is: the highest-priority kind, never a
+    candidate for the stratifier to drop.
+    """
+
+    def __init__(self, entry: dict[str, Any]):
+        self._d = {
+            "tag": entry["tag"],
+            "platform": entry.get("platform") or "instagram",
+            "family": "brand_core",
+            "priority": 10,
+            "maxResults": entry.get("maxResults"),
+            "active": True,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self._d)
+
+
+def publish_tags(
+    brand_id: str,
+    per_tag: int = 500,
+    max_tags: int = 50,
+    tags: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Fast publisher: enqueues one Pub/Sub message per active hashtag onto
     the scrape-tag topic. Returns immediately. The on_scrape_tag worker
     processes each tag independently with its own 540s budget.
+
+    `tags` overrides the brand pool with an explicit list of
+    {tag, platform?, maxResults?} — that is how an EVENT gets scraped.
+
+    Without it the event pages cannot scrape their own festival. An event's
+    hashtags (#lowlands, #lowlands2026) live in its JSON, and nothing copies
+    them into the brand pool — deliberately, because a festival tag left in the
+    pool is scraped forever after the festival ends. So a scrape started from an
+    event page was quietly scanning #vrijmibo and never #lowlands.
+
+    The budget gate, the degrade ladder and the per-tag result cap all still
+    apply: an event scrape spends from the same daily budget as any other.
     """
     brand = fs.brand_doc(brand_id).get()
     if not brand.exists:
@@ -128,11 +168,32 @@ def publish_tags(brand_id: str, per_tag: int = 500, max_tags: int = 50) -> dict[
         max_tags = max(5, max_tags // 2)
         log.info(f"[{brand_id}] degrade {level}: perTag->{per_tag} maxTags->{max_tags}")
 
-    pool_raw = list(fs.hashtag_pool_col(brand_id).where("active", "==", True).stream())
-    if not pool_raw:
-        # Nothing to fan out, so no worker exists to close the step later.
-        scan_state.step_finished(brand_id, "hashtags", {"queued": 0})
-        return {"queued": 0, "tags": []}
+    if tags:
+        # Explicit list: no stratified selection, since the caller already chose.
+        # Still capped by max_tags so a hand-assembled list cannot outspend the
+        # pool path.
+        pool_entries = [
+            {"tag": str(t.get("tag") or "").lower().lstrip("#"),
+             "platform": t.get("platform") or "instagram",
+             "maxResults": t.get("maxResults")}
+            for t in tags
+        ]
+        pool_entries = [e for e in pool_entries if e["tag"]][:max_tags]
+        if not pool_entries:
+            scan_state.step_finished(brand_id, "hashtags", {"queued": 0})
+            return {"queued": 0, "tags": []}
+        # Wrapped so the rest of this function cannot tell the difference: the
+        # budget sizing, the per-tag cap and the publish loop all read a doc-like
+        # object. An event scrape must be trimmed by the same guard as any other
+        # — it is the same money.
+        pool_raw = [_PlainTag(e) for e in pool_entries]
+        log.info(f"[{brand_id}] explicit tag list: {len(pool_entries)} tags")
+    else:
+        pool_raw = list(fs.hashtag_pool_col(brand_id).where("active", "==", True).stream())
+        if not pool_raw:
+            # Nothing to fan out, so no worker exists to close the step later.
+            scan_state.step_finished(brand_id, "hashtags", {"queued": 0})
+            return {"queued": 0, "tags": []}
 
     # Stratified selection, NOT a plain priority sort. A plain sort cut EVERY
     # lifestyle, typo and category tag out of the shipped 117-tag pool at the

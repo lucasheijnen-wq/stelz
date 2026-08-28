@@ -40,10 +40,14 @@ import type { Project } from '../lib/data'
 const ROSTER_CAP = 200
 const POSTS_PER = 8
 
-export function EventScanButton({ scan, project, canWrite, loading }: {
+export function EventScanButton({ scan, project, canWrite, loading, eventTags = [] }: {
   scan: ScanState | null
   project: Project | null
   canWrite: boolean
+  /** This event's own hashtags. Passing them scrapes THIS festival; leaving
+   *  them empty falls back to the brand pool, which for an event page means
+   *  scanning #vrijmibo and never #lowlands. See publish_tags. */
+  eventTags?: string[]
   /** Projects are still being fetched. Nothing is known yet, so nothing is
    *  said: `project` is null both while loading and when there genuinely is
    *  none, and rendering "roster nog niet geïmporteerd" over the first case
@@ -114,7 +118,11 @@ export function EventScanButton({ scan, project, canWrite, loading }: {
           + 'Vraag om een functions-deploy.')
       }
       if (withTags) {
-        await fbStepHashtags()
+        // The event's own tags when we have them. The brand pool has no
+        // #lowlands in it and never should — a festival tag scraped forever
+        // after the festival is pure cost — so an event scrape has to carry
+        // its list rather than rely on the pool.
+        await fbStepHashtags(150, 30, eventTags.map((t) => ({ tag: t })))
       }
     } catch (e) {
       setError((e as Error).message)

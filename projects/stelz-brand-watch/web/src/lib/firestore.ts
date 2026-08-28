@@ -636,8 +636,21 @@ export async function fbBootstrapBrand(brandName = 'Stelz') {
 // server now trims any request to fit the remaining budget (publish_tags),
 // but a client that asks for a sane size to begin with leaves the trim as the
 // safety net it should be, not the sizing mechanism.
-export async function fbStepHashtags(perTag = 150, maxTags = 30) {
-  return authedFetch('api_step_hashtags', { brandId: BRAND_ID, perTag, maxTags })
+/** Hashtag scrape.
+ *
+ * `tags` scrapes an explicit list instead of the brand's pool — that is how an
+ * event scrapes its own festival. An event's hashtags live in its JSON and are
+ * never copied into the pool, so without this an event scrape quietly scanned
+ * #vrijmibo and never #lowlands.
+ */
+export async function fbStepHashtags(
+  perTag = 150,
+  maxTags = 30,
+  tags?: { tag: string; platform?: string }[],
+) {
+  return authedFetch('api_step_hashtags', {
+    brandId: BRAND_ID, perTag, maxTags, ...(tags?.length ? { tags } : {}),
+  })
 }
 // `creatorIds` (platform_handle composites) scans exactly those creators and
 // ignores the due queue. OMITTED, not empty, for the brand-wide scan: the

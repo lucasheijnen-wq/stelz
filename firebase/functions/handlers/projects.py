@@ -369,10 +369,20 @@ def run(brand_id: str, uid: str, action: str, body: dict[str, Any]) -> dict[str,
         # ArrayUnion, not read-modify-write: two teammates adding simultaneously
         # must both land. The merge=True-replaces-arrays trap is documented at
         # scan_hashtags.py:58-64 — same lesson.
-        col.document(project_id).set({
-            "creatorIds": ArrayUnion(ids),
-            "updatedAt": SERVER_TIMESTAMP,
-        }, merge=True)
+        # Only the ids this call actually ADDS are written, and therefore only
+        # those can be rolled back below. Re-adding an existing member is normal
+        # — the paste-import flow re-sends a whole roster, overlaps included —
+        # and rolling back the raw `ids` would remove creators whose membership
+        # predates this call and had nothing to do with the cap breach.
+        # _restamp would then demote them to tier_3 and tracking would stop.
+        already = set(project.get("creatorIds") or [])
+        added = [c for c in ids if c not in already]
+
+        if added:
+            col.document(project_id).set({
+                "creatorIds": ArrayUnion(added),
+                "updatedAt": SERVER_TIMESTAMP,
+            }, merge=True)
 
         # Post-write re-check (review-confirmed TOCTOU): re-read the unions and
         # ROLL BACK this addition if a concurrent add pushed either past its
@@ -383,9 +393,10 @@ def run(brand_id: str, uid: str, action: str, body: dict[str, Any]) -> dict[str,
         try:
             _check_caps(_tracked_union(live), _tracked_union(live, only_tier="tier_1"))
         except ProjectError:
-            col.document(project_id).set({"creatorIds": ArrayRemove(ids)}, merge=True)
-            live = _live_projects(brand_id)
-            _restamp(brand_id, ids, live)
+            if added:
+                col.document(project_id).set({"creatorIds": ArrayRemove(added)}, merge=True)
+                live = _live_projects(brand_id)
+                _restamp(brand_id, added, live)
             raise
 
         # Tier via _effective_tier, not a blind stamp of THIS project's tier —

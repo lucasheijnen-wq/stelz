@@ -196,3 +196,30 @@ class TestPoolPatchDocs(unittest.TestCase):
     def test_blank_tag_is_skipped(self):
         self.assertEqual(hashtags.pool_patch_docs([{"tag": "  "}, {"tag": "#ok"}], set())[0][0],
                          "instagram_ok")
+
+
+class TestExplicitTagList(unittest.TestCase):
+    """publish_tags(tags=[...]) — how an EVENT scrapes its own hashtags.
+
+    A festival's tags live in its event JSON and are never copied into the brand
+    pool (a tag left there is scraped forever after the festival ends). Without
+    this path a scrape started from an event page scanned the brand pool and
+    never touched #lowlands — the button looked like it worked.
+    """
+
+    def test_wraps_entries_so_the_pool_path_can_read_them(self):
+        from handlers.scan_hashtags import _PlainTag
+        d = _PlainTag({"tag": "lowlands", "platform": "instagram"}).to_dict()
+        self.assertEqual(d["tag"], "lowlands")
+        self.assertEqual(d["platform"], "instagram")
+        self.assertTrue(d["active"])
+
+    def test_explicit_tags_are_never_dropped_by_the_stratifier(self):
+        # An explicitly requested tag competing against the real pool must
+        # survive the cut — someone asked for it by name.
+        from handlers.scan_hashtags import _PlainTag
+        from lib import hashtags
+        pool = [{**t, "_doc": None} for t in hashtags.stelz_pool("instagram")]
+        mine = {**_PlainTag({"tag": "lowlands2026"}).to_dict(), "_doc": None}
+        selected = hashtags.select_tags(pool + [mine], 5)
+        self.assertIn("lowlands2026", [t["tag"] for t in selected])

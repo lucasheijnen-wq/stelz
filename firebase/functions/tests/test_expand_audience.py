@@ -49,6 +49,23 @@ for _attr, _val in (("SERVER_TIMESTAMP", "TS"), ("Increment", lambda n: ("INC", 
 
 from handlers import expand_audience  # noqa: E402
 
+# Bind OUR fakes onto the module under test, not just onto the shared stub.
+#
+# The loop above installs them with `if not hasattr`, which is correct for a
+# module that runs alone and wrong for the full suite: sys.modules is shared, so
+# whichever test module imports FIRST wins the shared stub, and every later one
+# silently runs against a different fake. test_projects.py installs a class
+# whose ArrayUnion returns an object; the assertions here expect the tuple
+# ('UNION', (...)) this module defines. That is why all three tests in this file
+# pass on their own and fail in `unittest discover` — an order-dependent suite,
+# which is worse than a failing one because it looks green when it is not.
+#
+# expand_audience binds these names at import (`from google.cloud.firestore
+# import ...`), so re-binding on the handler is what actually takes effect.
+expand_audience.ArrayUnion = lambda v: ("UNION", tuple(v))
+expand_audience.Increment = lambda n: ("INC", n)
+expand_audience.SERVER_TIMESTAMP = "TS"
+
 
 class Snap:
     def __init__(self, data, exists=True):

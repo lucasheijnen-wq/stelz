@@ -162,9 +162,14 @@ class TestRecipeInputsMatchTheCallSites(unittest.TestCase):
         # Anchoring on `\)` made this test fail on a new parameter that could
         # not affect a price, which teaches people to loosen the assertion
         # rather than read it.
+        # `\s*` between the parameters, because a signature that grows a third
+        # parameter also grows a line break — fbStepHashtags took an optional
+        # `tags` for the event scrapes and went multi-line. Matching only the
+        # single-line form pinned the FORMATTING, not the defaults, and failed
+        # on a change that cannot move a price.
         for sig, keys in (
-            (r"fbStepHashtags\(perTag = (\d+), maxTags = (\d+)[,)]", ("hashtagPerTag", "hashtagMaxTags")),
-            (r"fbStepCreators\(maxCreators = (\d+), postsPer = (\d+)[,)]", ("creatorMax", "creatorPostsPer")),
+            (r"fbStepHashtags\(\s*perTag = (\d+),\s*maxTags = (\d+)\s*[,)]", ("hashtagPerTag", "hashtagMaxTags")),
+            (r"fbStepCreators\(\s*maxCreators = (\d+),\s*postsPer = (\d+)\s*[,)]", ("creatorMax", "creatorPostsPer")),
         ):
             m = re.search(sig, self.firestore_ts)
             self.assertIsNotNone(m, f"call site not found: {sig}")

@@ -86,7 +86,11 @@ options.set_global_options(region="europe-west1", memory=options.MemoryOption.MB
 
 
 @scheduler_fn.on_schedule(
-    schedule="every 6 hours",
+    # 4-hourly since 2026-08-21, at Lukas's request during Lowlands. A story
+    # lives 24h so 6h already caught every one; 4h buys a fresher dashboard
+    # while a festival is running, at 6 runs/day instead of 4 (~$1.68/day at
+    # 60 handles). Worth returning to 6h once no event is live.
+    schedule="every 4 hours",
     region="europe-west1",
     memory=options.MemoryOption.GB_1,
     timeout_sec=540,
@@ -359,6 +363,9 @@ def api_step_hashtags(req: https_fn.Request) -> https_fn.Response:
         brand_id,
         per_tag=int(body.get("perTag") or 500),
         max_tags=int(body.get("maxTags") or 50),
+        # An event passes its own hashtags; without this the brand pool is
+        # scanned and a festival's tags are never reached. See publish_tags.
+        tags=body.get("tags") if isinstance(body.get("tags"), list) else None,
     ), step="hashtags", completes_inline=False)
 
 

@@ -595,3 +595,50 @@ class TestEventFields(ProjectsBase):
         out = projects._serialize("oud", self.projects_store["oud"])
         self.assertIsNone(out["startsAt"])
         self.assertEqual(out["hashtags"], [])
+
+
+class TestRollbackKeepsExistingMembers(ProjectsBase):
+    """A cap rollback must undo only what THIS call added.
+
+    Re-adding someone already in the project is routine: the paste-import flow
+    re-sends a whole roster, overlaps included. Rolling back the raw request
+    would then evict members whose membership predates the call and had nothing
+    to do with the breach — and _restamp would drop them to tier_3, so tracking
+    would stop silently.
+
+    Reaching the rollback at all takes a CONCURRENT add: the pre-check catches
+    an over-cap request on its own, so the post-write re-check only fires when
+    somebody else consumed the slots in between. That race is what the patched
+    _live_projects below simulates — without it this test passes whether the
+    bug is present or not, which is how the first version of it fooled me.
+    """
+
+    def test_rollback_removes_only_the_newly_added(self):
+        pid = self.create(trackingTier="tier_2")["project"]["id"]
+        projects.run("stelz", "uid1", "addCreators",
+                     {"projectId": pid, "creatorIds": ["instagram_anna"]})
+
+        real_live = projects._live_projects
+        calls = {"n": 0}
+        breach = [f"instagram_x{i}" for i in range(projects.TOTAL_TRACKED_CAP)]
+
+        def racing_live(brand_id):
+            """First call = the world before the race; later calls = after a
+            concurrent project consumed every slot."""
+            calls["n"] += 1
+            live = real_live(brand_id)
+            if calls["n"] == 1:
+                return live
+            return live + [("concurrent", {"trackingTier": "tier_2", "creatorIds": breach})]
+
+        with mock.patch.object(projects, "_live_projects", racing_live):
+            with self.assertRaises(projects.ProjectError):
+                projects.run("stelz", "uid1", "addCreators",
+                             {"projectId": pid, "creatorIds": ["instagram_anna", "instagram_bob"]})
+
+        members = self.projects_store[pid].get("creatorIds") or []
+        self.assertIn("instagram_anna", members,
+                      "a pre-existing member was evicted by this call's rollback")
+        self.assertNotIn("instagram_bob", members)
+        self.assertEqual(self.creators_store["instagram_anna"]["tier"], "tier_2",
+                         "the surviving member must keep being tracked")
