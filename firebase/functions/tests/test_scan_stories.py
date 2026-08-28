@@ -92,6 +92,9 @@ class FakeSnap:
 class FakeDoc:
     def __init__(self, store, key):
         self._store, self._key = store, key
+        # The real DocumentReference exposes its id; get_all in the named-
+        # roster fake resolves refs by it.
+        self.id = key
         self.subs: dict[str, dict] = {}
 
     def get(self):
@@ -154,6 +157,14 @@ class StoriesBase(unittest.TestCase):
             posts_col=lambda bid: self.posts_col,
             scan_runs_col=lambda bid: self.runs_col,
             composite_id=lambda *parts: "_".join(p.lower() for p in parts if p),
+            # get_all resolves refs by id, missing docs as exists=False — the
+            # real client's behaviour, which the named-roster path filters on.
+            db=lambda: types.SimpleNamespace(get_all=lambda refs: [
+                FakeSnap(r.id, self.creators[r.id], store=self.creators)
+                if r.id in self.creators else
+                types.SimpleNamespace(id=r.id, exists=False, to_dict=lambda: {})
+                for r in refs
+            ]),
         )
         self.usage = types.SimpleNamespace(
             budget_exhausted=lambda bid: False,
@@ -667,6 +678,34 @@ class TestSessionCounters(StoriesBase):
         self.assertEqual(out["imagesEnqueued"], 1)
         self.assertEqual([s for s in self.brand_scan_writes()
                           if "detectTasksEnqueued" in s], [])
+
+
+
+class TestScopeMarker(StoriesBase):
+    """The event button reads `scope` back to detect a deployed backend that
+    silently ignored its roster — old code has no marker at all, so it must be
+    exactly 'named' when the list was used and present-but-different otherwise."""
+
+    def test_the_tier_sweep_says_tier(self):
+        self.assertEqual(self.run_stories()["scope"], "tier")
+
+    def test_a_named_roster_says_named(self):
+        out = self.run_stories(creator_ids=["instagram_anna"])
+        self.assertEqual(out["scope"], "named")
+        self.assertEqual(out["accountsChecked"], 1)
+
+    def test_naming_drops_tiktok_ids_stories_are_instagram_only(self):
+        self.creators["tiktok_anna"] = {
+            "handle": "annatt", "platform": "tiktok", "tier": "tier_2"}
+        out = self.run_stories(creator_ids=["instagram_anna", "tiktok_anna"])
+        self.assertEqual(out["accountsChecked"], 1)
+
+    def test_an_empty_named_set_does_not_fall_back_to_the_tier_sweep(self):
+        # Same rule as scan_creators: [] means "the caller named a roster and
+        # came up with nobody", and falling through would sweep the brand.
+        out = self.run_stories(creator_ids=[])
+        self.assertEqual(out.get("skipped"), "no_creators")
+        self.apify.run_sync.assert_not_called()
 
 
 if __name__ == "__main__":

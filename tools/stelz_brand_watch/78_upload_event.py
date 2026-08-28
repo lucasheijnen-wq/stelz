@@ -234,6 +234,14 @@ def media_path_for(preview_url: str) -> Path | None:
     return p if p.exists() else None
 
 
+NOT_DEPLOYED_MSG = (
+    "  ✕ api_import_event bestaat niet in productie (404) — de functie is "
+    "gemerged maar nooit uitgerold.\n"
+    "    Fix: cd firebase/functions && firebase deploy --only functions "
+    "--project brand-audit-4b2cc\n"
+    "    Tot die tijd blijft elke ronde lokaal; de oogst zelf is geslaagd.")
+
+
 def call_api(base: str, token: str, body: dict) -> dict:
     req = urllib.request.Request(
         f"{base}/api_import_event",
@@ -247,11 +255,26 @@ def call_api(base: str, token: str, body: dict) -> dict:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         detail = e.read().decode()[:300]
+        if e.code == 404:
+            # Niet "het endpoint gaf een fout" maar "het endpoint bestaat niet".
+            # Dit was een kale traceback: de server brak de verbinding terwijl
+            # wij nog 81 MB base64 stonden te sturen, en de crash zei niets
+            # over de oorzaak. De preflight in main() vangt dit nu vroeg; deze
+            # tak blijft als vangnet voor een deploy die halverwege verdwijnt.
+            raise SystemExit(NOT_DEPLOYED_MSG)
         if e.code in (401, 403):
             raise SystemExit(
                 f"  ✕ {e.code}: token verlopen of geen member — haal een vers "
                 f"ID-token op en draai opnieuw (upserts, niets gaat dubbel).\n  {detail}")
         raise SystemExit(f"  ✕ HTTP {e.code}: {detail}")
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+        # Geen traceback: een gefaalde upload is een feit om te melden, niet
+        # een crash. ConnectionError dekt BrokenPipeError/ConnectionResetError —
+        # wat er gebeurt wanneer de server ophangt terwijl wij nog zenden.
+        reason = getattr(e, "reason", None) or e
+        raise SystemExit(
+            f"  ✕ upload afgebroken: {type(e).__name__}: {str(reason)[:200]}\n"
+            "    Herdraaien is veilig — alles is een upsert, niets gaat dubbel.")
 
 
 def main() -> int:
@@ -320,6 +343,15 @@ def main() -> int:
         print("  geen --token en geen bruikbaar --token-file — zie de docstring")
         return 2
     args.token = token
+
+    # 0. PREFLIGHT, vóór de eerste byte media. Eén lege rows-batch is een
+    # geldige call die niets schrijft en {"posts": 0, "detections": 0} terug
+    # hoort te geven. Bestaat het endpoint niet (404) of is het token niet
+    # goed (401/403), dan valt dat HIER — met de melding die de fix noemt —
+    # in plaats van als afgebroken verbinding halverwege 81 MB base64.
+    call_api(args.base, args.token, {
+        "brandId": BRAND_ID, "action": "rows", "posts": [], "detections": [],
+    })
 
     # 1. Treffer-beelden eerst: de rijen verwijzen naar de Storage-URLs.
     #

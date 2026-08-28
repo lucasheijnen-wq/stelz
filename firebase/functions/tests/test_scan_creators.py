@@ -420,6 +420,19 @@ class TestNamedRoster(ScanCreatorsBase):
         self.assertEqual(out.get("skipped"), "no_creators")
         self.apify.scrape_profile_ig.assert_not_called()
 
+    def test_the_result_says_how_the_creators_were_chosen(self):
+        # The event button reads `scope` back to detect a deployed backend that
+        # silently ignored its roster (old code has no marker at all). So the
+        # marker must be exactly 'named' on the named path — and present-but-
+        # different on the due path, so its absence stays unambiguous.
+        self.creators["instagram_anna"] = {
+            "status": "discovered", "platform": "instagram", "handle": "anna",
+            "nextScanAt": PAST,
+        }
+        self.assertEqual(self.run_scan()["scope"], "due")
+        self.assertEqual(
+            self.run_scan(creator_ids=["instagram_anna"])["scope"], "named")
+
     def test_max_creators_still_caps_a_named_set(self):
         for i in range(5):
             self.creators[f"instagram_c{i}"] = {
