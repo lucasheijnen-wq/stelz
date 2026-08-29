@@ -62,6 +62,9 @@ export function useEventCampaign(eventId: string | null): {
   sources: RowSources
   /** True when ANY row on screen came from the local fixture. */
   preview: boolean
+  /** A Firestore query came back at its row cap, so these rows are not all of
+   *  them. The totals must be presented as a floor, not as the answer. */
+  truncated: boolean
   /** True until BOTH sources have settled. The denominator card is gated on
    *  this: content may render from whichever half arrived first, but "X van Y
    *  stuks content" must not be printed over half an answer and then change. */
@@ -152,6 +155,7 @@ export function useEventCampaign(eventId: string | null): {
     detections: merged.detections.length > 0 ? merged.detections : NO_ROWS,
     sources: merged.sources,
     preview: merged.sources.local > 0,
+    truncated: liveData?.truncated === true,
     loading: eventId != null && (!liveSettled || !localSettled),
     reload,
   }

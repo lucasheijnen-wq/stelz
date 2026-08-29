@@ -11,13 +11,14 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from google.cloud import pubsub_v1
 from google.cloud.firestore import SERVER_TIMESTAMP, Increment
 
-from lib import apify, fs, usage
+from lib import apify, fs, scan_state, usage
 
 log = logging.getLogger(__name__)
 
@@ -25,9 +26,27 @@ PROJECT_ID = "brand-audit-4b2cc"
 DETECT_IMAGE_TOPIC = "detect-image"
 DETECT_VIDEO_TOPIC = "detect-video"
 
+# HOW LONG THIS FUNCTION MAY STAY, and why it is not the deployed 540.
+#
+# api_step_creators runs with timeout_sec=540. One Instagram batch is a
+# synchronous apify.scrape_profile_ig -> run_sync(timeout=180), whose HTTP read
+# allows 210 seconds. At most TWO of those fit in a call. Going over is not a
+# slow scan, it is a killed container: Cloud Run drops the connection, the
+# browser gets a bare TypeError, and — before the per-batch persist below —
+# every scraped row died in memory while Apify had already billed for it. A
+# 28-person roster is three batches, so this was reachable on the intended
+# path, not only on the brand-wide one.
+#
+# So we stop STARTING batches while there is still room to finish the one in
+# flight and write it down, and report what is left instead of being killed.
+DEADLINE_S = 480          # of the deployed 540, leaving a minute to flush
+BATCH_WORST_CASE_S = 210  # run_sync(timeout=180) plus its 30s read slack
+PERSIST_MARGIN_S = 30
+
 
 def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency: int = 6,
-        dry_run: bool = False, creator_ids: list[str] | None = None) -> dict[str, Any]:
+        dry_run: bool = False, creator_ids: list[str] | None = None,
+        deadline_s: float = DEADLINE_S) -> dict[str, Any]:
     """`creator_ids`: scan exactly these creator docs, ignoring nextScanAt.
 
     The default (None) keeps the due-queue behaviour the dashboard's brand-wide
@@ -41,17 +60,24 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
     Ids are `platform_handle` composites — the same ones projects store in
     creatorIds. Still capped by max_creators: a caller naming 500 handles is a
     cost incident, not a request."""
+    started = time.monotonic()
+    # EVERY return carries `scope`, including the ones that do nothing. The
+    # event button reads its absence as "this backend predates creator_ids"
+    # and says so in red; when only the success path stamped it, a scan
+    # skipped for budget made a correctly deployed backend accuse itself of
+    # not being deployed, while the real reason never reached the screen.
+    scope = "named" if creator_ids is not None else "due"
     brand = fs.brand_doc(brand_id).get()
     if not brand.exists:
         raise ValueError(f"brand not found: {brand_id}")
     if usage.budget_exhausted(brand_id):
-        return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0, "videos_enqueued": 0, "skipped": "budget_exhausted"}
+        return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0, "videos_enqueued": 0, "skipped": "budget_exhausted", "scope": scope}
     if not usage.scraping_allowed(brand_id):
         # The 95% degrade rung, same gate refresh_profiles uses. Without it the
         # creator scan kept scraping at full width until the budget was fully
         # blown — and, before the record() fix below, without even reporting
         # the spend that was blowing it.
-        return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0, "videos_enqueued": 0, "skipped": "budget"}
+        return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0, "videos_enqueued": 0, "skipped": "budget", "scope": scope}
 
     # Hoisted out of the due-query branch below: the re-schedule at the end of
     # this function stamps nextScanAt off it, so the named-set path needs it too.
@@ -71,7 +97,7 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
             # Distinct from "found nothing": these creators are not tracked at
             # all, and the fix is to import the roster, not to scan again.
             return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0,
-                    "videos_enqueued": 0, "skipped": "no_creators"}
+                    "videos_enqueued": 0, "skipped": "no_creators", "scope": scope}
     else:
         # Fetch due creators (nextScanAt <= now, status in active set)
         due_q = (
@@ -84,7 +110,8 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
         due = [d for d in due_q]
         log.info(f"due creators: {len(due)}")
         if not due:
-            return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0}
+            return {"creators_scanned": 0, "posts_added": 0, "images_enqueued": 0,
+                    "videos_enqueued": 0, "skipped": "no_creators", "scope": scope}
 
     # Build handle batches (Apify takes up to ~25 per call)
     posts_col = fs.posts_col(brand_id)
@@ -119,9 +146,16 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
     # keeps each Apify call under our function timeout budget.
     IG_BATCH = 10
     ig_handles = handles_by_platform.get("instagram") or []
+    handles_left = 0  # unscraped handles when the deadline cut the loop short
     if ig_handles:
         all_ig_items: list[dict] = []
         for i in range(0, len(ig_handles), IG_BATCH):
+            # THE DEADLINE, checked before starting — never mid-batch. A batch
+            # we have paid Apify for must always reach the persist below.
+            if (time.monotonic() - started) + BATCH_WORST_CASE_S + PERSIST_MARGIN_S > deadline_s:
+                handles_left = len(ig_handles) - i
+                log.info(f"  deadline: stopping with {handles_left} handles unscraped")
+                break
             batch = ig_handles[i:i + IG_BATCH]
             try:
                 items = apify.scrape_profile_ig(batch, posts_per)
@@ -131,11 +165,19 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
             except Exception as e:
                 log.error(f"  IG apify batch error ({batch[:3]}...): {e}")
                 continue
-        ig_results = len(all_ig_items)
+            # PERSIST AND BILL PER BATCH, not after the loop. This used to
+            # accumulate every batch in all_ig_items and write the lot at the
+            # end, so a container killed on the timeout wall wrote NOTHING
+            # while Apify had already invoiced each finished batch — and
+            # usage.record never ran either, so the spend that caused it was
+            # invisible to the budget ladder. Whatever a batch cost, its rows
+            # are on disk before the next one starts.
+            for item in items:
+                _persist_post(brand_id, item, "instagram", creator_by_handle, posts_col, new_items)
+                posts_added += 1
+            ig_results += len(items)
+            usage.record(brand_id, apify_runs=1, apify_ig_results=len(items))
         _audit_creators_scrape(brand_id, "instagram", len(ig_handles), all_ig_items)
-        for item in all_ig_items:
-            _persist_post(brand_id, item, "instagram", creator_by_handle, posts_col, new_items)
-            posts_added += 1
 
     # ── TikTok: parallel (clockworks runs one profile per actor call) ──
     tt_handles = handles_by_platform.get("tiktok") or []
@@ -164,12 +206,12 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
                     posts_added += 1
         tt_results = len(all_tt_items)
         _audit_creators_scrape(brand_id, "tiktok", len(tt_handles), all_tt_items)
-
-    # apify_ig_results is the billed unit ($2.30/1k). Recording runs alone —
-    # which cost $0 in COST_PER_UNIT — made every dollar of creator-scan
-    # scraping invisible to the budget ladder: the guards above were reading a
-    # counter this function never fed.
-    usage.record(brand_id, apify_runs=apify_runs, apify_ig_results=ig_results, apify_tt_results=tt_results)
+        # TikTok bills per run at $0.0000 (clockworks is free) and its futures
+        # all persist above before this line, so one record for the block is
+        # equivalent to one per future. Instagram is NOT recorded here — it is
+        # billed per batch inside the loop, and recording it twice would tell
+        # the budget ladder the scan cost double what it did.
+        usage.record(brand_id, apify_runs=len(tt_handles), apify_tt_results=tt_results)
 
     # Update lastScannedAt + nextScanAt for all due creators
     for c in due:
@@ -202,9 +244,14 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
         # detectTasksEnqueued while the detect workers' bump_detect_progress
         # counts completions from EVERY path — so completions overshot the
         # denominator, the bar clamped to 100% and the phase left 'analysing'
-        # while this path's detections were still draining. Creators only runs
-        # via HTTP (the scheduler was removed), so unconditional is correct.
-        if images_enqueued + videos_enqueued > 0:
+        # while this path's detections were still draining.
+        #
+        # Gated on an OPEN session, not unconditional. Without the gate a scan
+        # that runs outside one raises the denominator of the last session that
+        # closed, whose completions are frozen — a finished scan from last week
+        # flips back to 'analysing' and prints an ETA measured from its own
+        # week-old startedAt.
+        if images_enqueued + videos_enqueued > 0 and scan_state.session_is_open(brand_id):
             fs.brand_doc(brand_id).set({"scan": {
                 "detectTasksEnqueued": Increment(images_enqueued + videos_enqueued),
                 "lastActivityAt": SERVER_TIMESTAMP,
@@ -232,7 +279,11 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
         # and scans the due queue instead of the roster it was asked for; the
         # marker's ABSENCE in the response is how the frontend detects that and
         # says so, rather than reporting a roster scan that never happened.
-        "scope": "named" if creator_ids is not None else "due",
+        "scope": scope,
+        # Handles the deadline did not get to. Non-zero means "press again for
+        # the rest" — the caller repeats rather than assuming this was all of
+        # it, which is what made a truncated scan look like a complete one.
+        "more_remaining": handles_left,
     }
 
 
@@ -257,14 +308,28 @@ def _persist_post(
 
     if platform == "instagram":
         ext_id = str(item.get("id") or item.get("shortCode") or "")
+        # The SHORTCODE, kept beside the doc id rather than as it. The import
+        # path (78_upload_event.post_doc_id) names posts instagram_<shortCode>
+        # while this scanner names the same post instagram_<numeric id>, so the
+        # two never collide and every roster post counted twice once an online
+        # scan ran over already-imported rows. Changing either doc id would
+        # split the rows already in Firestore; a shared KEY dedupes them
+        # without a migration. Lowercased because composite_id lowercases and
+        # the fixture's postKey does not.
+        post_key = str(item.get("shortCode") or "").lower() or None
         url = item.get("url")
         caption = item.get("caption") or ""
         hashtags = item.get("hashtags") or []
         mentions = item.get("mentions") or []
         posted_at_iso = item.get("timestamp")
-        likes = item.get("likesCount") or 0
-        comments = item.get("commentsCount") or 0
-        views = item.get("videoViewCount") or 0
+        # NO `or 0` on the metrics. Instagram omits the field when a count is
+        # hidden and omits videoViewCount on every photo, so `or 0` turned "not
+        # published" into "zero" — and the KPI tiles average over posts that
+        # carry a number, so a photo claiming zero views dragged the mean of
+        # every video down with it. Absent stays absent; a real 0 stays 0.
+        likes = item.get("likesCount")
+        comments = item.get("commentsCount")
+        views = item.get("videoViewCount")
         is_video = item.get("type") == "Video" or bool(item.get("videoUrl"))
         if is_video:
             video_url = item.get("videoUrl")  # signed CDN URL, short-lived
@@ -289,14 +354,18 @@ def _persist_post(
     else:  # tiktok — always a video
         follower_count = (item.get("authorMeta") or {}).get("fans")
         ext_id = str(item.get("id") or item.get("aweme_id") or "")
+        # TikTok has no shortcode; its numeric id IS the stable public key and
+        # the import path uses the same one, so they already agree.
+        post_key = ext_id.lower() or None
         url = item.get("webVideoUrl") or item.get("shareUrl")
         caption = item.get("text") or item.get("desc") or ""
         hashtags = [h.get("name") for h in (item.get("hashtags") or []) if h.get("name")]
         mentions = [m for m in (item.get("mentions") or []) if isinstance(m, str)]
         posted_at_iso = item.get("createTimeISO") or item.get("createTime")
-        likes = item.get("diggCount") or 0
-        comments = item.get("commentCount") or 0
-        views = item.get("playCount") or 0
+        # Same rule as Instagram above: a missing count is unknown, not zero.
+        likes = item.get("diggCount")
+        comments = item.get("commentCount")
+        views = item.get("playCount")
         video_url = (
             item.get("videoMeta", {}).get("downloadAddr")
             or item.get("downloadAddr")
@@ -373,6 +442,10 @@ def _persist_post(
         "creatorHandle": handle,
         "platform": platform,
         "externalId": ext_id,
+        # The cross-path identity — see post_key above. dedupeDocs in the web
+        # client collapses on this before falling back to the doc id, so an
+        # imported row and a scanned row for the same post become one row.
+        "postKey": post_key,
         "url": url,
         "caption": caption[:2000],
         "hashtags": [h.lower() for h in hashtags],

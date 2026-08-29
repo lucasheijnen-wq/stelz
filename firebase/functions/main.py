@@ -333,7 +333,17 @@ def _run_step(req: https_fn.Request, runner_factory, step: str | None = None,
             scan_state.step_started(brand_id, step)
         result = runner_factory(brand_id, body)
         if step and completes_inline:
-            scan_state.step_finished(brand_id, step, result if isinstance(result, dict) else {})
+            # A handler that REFUSED is not a step that succeeded. Every
+            # skipped return carries `skipped` (budget_exhausted, budget,
+            # no_creators); marking those green said a scan had run when the
+            # budget gate had turned it away, which is how a brand can look
+            # scanned for a week without a single request leaving the building.
+            skipped = result.get("skipped") if isinstance(result, dict) else None
+            if skipped:
+                scan_state.step_skipped(brand_id, step, str(skipped),
+                                        result if isinstance(result, dict) else {})
+            else:
+                scan_state.step_finished(brand_id, step, result if isinstance(result, dict) else {})
         return https_fn.Response(json.dumps(result), status=200, mimetype="application/json")
     except NotAuthenticated as e:
         return https_fn.Response(json.dumps({"error": str(e)}), status=401, mimetype="application/json")
@@ -351,6 +361,48 @@ def _run_step(req: https_fn.Request, runner_factory, step: str | None = None,
 
 
 CORS_POST = options.CorsOptions(cors_origins=["*"], cors_methods=["POST", "OPTIONS"])
+
+
+@https_fn.on_request(cors=CORS_POST, memory=options.MemoryOption.MB_512, timeout_sec=60)
+def api_scan_session(req: https_fn.Request) -> https_fn.Response:
+    """Open or close a scan SESSION — the flat scan.startedAt/finishedAt pair.
+
+    Exists because only one code path ever wrote those fields
+    (scan_hashtags.publish_tags), and the event button does not call hashtags.
+    Without a session the progress panel never mounts, the page never reloads
+    after a scan, and the button never locks — see lib/scan_state.session_open
+    for the full account.
+
+    The event button opens one around its chunk loop and closes it in a
+    finally, so a scan spread over several requests is still ONE session on
+    screen instead of a row of unrelated steps.
+    """
+    if req.method == "OPTIONS":
+        return https_fn.Response("", status=204)
+    if req.method != "POST":
+        return https_fn.Response("Method not allowed", status=405)
+    try:
+        uid = _require_auth(req)
+        body = req.get_json(silent=True) or {}
+        brand_id = body.get("brandId")
+        if not brand_id:
+            return https_fn.Response(json.dumps({"error": "brandId required"}), status=400, mimetype="application/json")
+        _require_brand_member(uid, brand_id)
+        action = str(body.get("action") or "")
+        if action == "open":
+            scan_state.session_open(brand_id)
+        elif action == "close":
+            scan_state.session_close(brand_id, end_reason=body.get("endReason"))
+        else:
+            return https_fn.Response(json.dumps({"error": "action must be open or close"}), status=400, mimetype="application/json")
+        return https_fn.Response(json.dumps({"ok": True, "action": action}), status=200, mimetype="application/json")
+    except NotAuthenticated as e:
+        return https_fn.Response(json.dumps({"error": str(e)}), status=401, mimetype="application/json")
+    except NotABrandMember as e:
+        return https_fn.Response(json.dumps({"error": str(e)}), status=403, mimetype="application/json")
+    except Exception as e:
+        log.exception("scan_session failed")
+        return https_fn.Response(json.dumps({"error": str(e)}), status=500, mimetype="application/json")
 
 
 @https_fn.on_request(cors=CORS_POST, memory=options.MemoryOption.MB_512, timeout_sec=60)

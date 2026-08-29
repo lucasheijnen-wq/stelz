@@ -267,6 +267,51 @@ class TestSidecarChildIds(unittest.TestCase):
         self.assertIsNone(cover)
         self.assertEqual(writes[post_id]["parentPostId"], "P123")
 
+    def test_every_slide_of_a_carousel_shares_the_parents_key(self):
+        """The metrics on a slide are the PARENT'S, copied down so a slide can
+        show its post's numbers. Counted per row that turned a ten-slide
+        carousel with 500 likes into 5.000: the rollup keys on postKey, and a
+        slide whose postKey was null fell back to its own doc id, which is
+        unique per slide. One key per carousel is what collapses them."""
+        writes: dict[str, dict] = {}
+
+        class Col:
+            def document(self, doc_id):
+                class Doc:
+                    def set(self, payload, merge=False):
+                        writes[doc_id] = payload
+                return Doc()
+
+        parent = {"id": "P123", "shortCode": "DaBcDeF", "caption": "hi",
+                  "hashtags": [], "timestamp": "2026-08-22T10:00:00Z",
+                  "url": "u", "likesCount": 500}
+        ids = [scan_hashtags._persist_sidecar_child(
+            "stelz", parent, {"id": f"C{i}", "displayUrl": "http://img", "order": i},
+            "anna", Col())[0] for i in range(3)]
+
+        self.assertEqual(len(set(ids)), 3, "slides stay separate documents — "
+                                          "each one has its own image to show")
+        keys = {writes[i]["postKey"] for i in ids}
+        self.assertEqual(keys, {"dabcdef"}, "but they count as one post")
+        self.assertEqual([writes[i]["slot"] for i in ids], [0, 1, 2])
+
+    def test_a_missing_parent_count_is_not_written_as_zero(self):
+        writes: dict[str, dict] = {}
+
+        class Col:
+            def document(self, doc_id):
+                class Doc:
+                    def set(self, payload, merge=False):
+                        writes[doc_id] = payload
+                return Doc()
+
+        parent = {"id": "P1", "shortCode": "AAA", "caption": "", "hashtags": [],
+                  "timestamp": "2026-08-22T10:00:00Z", "url": "u"}
+        pid, *_ = scan_hashtags._persist_sidecar_child(
+            "stelz", parent, {"id": "C1", "displayUrl": "http://img"}, "anna", Col())
+        self.assertIsNone(writes[pid]["likesCount"])
+        self.assertIsNone(writes[pid]["viewsCount"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -71,6 +71,27 @@ def step_finished(brand_id: str, step: str, counts: dict[str, Any] | None = None
         log.exception(f"[{brand_id}] step_finished({step}) failed")
 
 
+def step_skipped(brand_id: str, step: str, reason: str,
+                 counts: dict[str, Any] | None = None) -> None:
+    """The handler ran, refused, and said why.
+
+    Distinct from 'done' (it did the work) and from 'error' (something broke).
+    A budget gate turning a scan away is a normal, expected outcome — but it
+    was being painted green, so a brand whose daily budget was exhausted
+    looked fully scanned every day while nothing was scraped at all.
+    """
+    try:
+        fs.brand_doc(brand_id).update({
+            f"scan.steps.{step}.state": "skipped",
+            f"scan.steps.{step}.error": reason[:300],
+            f"scan.steps.{step}.finishedAt": SERVER_TIMESTAMP,
+            f"scan.steps.{step}.counts": _sanitize_counts(counts),
+            "scan.lastActivityAt": SERVER_TIMESTAMP,
+        })
+    except Exception:
+        log.exception(f"[{brand_id}] step_skipped({step}) failed")
+
+
 def step_failed(brand_id: str, step: str, error: str) -> None:
     try:
         fs.brand_doc(brand_id).update({
@@ -81,6 +102,85 @@ def step_failed(brand_id: str, step: str, error: str) -> None:
         })
     except Exception:
         log.exception(f"[{brand_id}] step_failed({step}) failed")
+
+
+def session_open(brand_id: str) -> None:
+    """Start a scan SESSION — the flat `scan.startedAt`/`finishedAt` pair.
+
+    Until this existed, exactly one code path wrote those two fields:
+    scan_hashtags.publish_tags. Everything else — including step_started above
+    — wrote only `scan.steps.{step}`. The brand-wide Run scan got away with it
+    because it awaits fbStepHashtags() first, so a session was always open by
+    the time the other steps ran. The EVENT button does not call hashtags at
+    all (the checkbox defaults off), so for an event scan the pair never moved,
+    and three things followed from that one gap:
+
+      · ScanPanel returns null on phase 'idle', and scanPhase is 'idle'
+        whenever startedAt is unset — so the progress panel the button's own
+        tooltip points at stayed unmounted for the whole scan.
+      · Event.tsx reloads the campaign on the running -> finished transition.
+        `running` was never true, so the transition never happened and the page
+        kept showing pre-scan rows after a successful scan. That is the exact
+        complaint the button was built to answer.
+      · `running` also gates the button. False means a second press — or a page
+        refresh mid-scan — starts another paid Apify scrape.
+
+    Counters are reset here, not merged. A session that inherited last week's
+    detectTasksEnqueued reported completions against a stale denominator and
+    computed its ETA from a startedAt seven days old.
+    """
+    try:
+        fs.brand_doc(brand_id).set({
+            "scan": {
+                "startedAt": SERVER_TIMESTAMP,
+                "finishedAt": None,
+                "hashtagQueued": 0,
+                "hashtagDone": 0,
+                "postsWritten": 0,
+                "detectTasksEnqueued": 0,
+                "detectionsCompleted": 0,
+                "detectionsHit": 0,
+                "skippedCount": 0,
+                "endReason": None,
+                "tags": [],
+                "lastActivityAt": SERVER_TIMESTAMP,
+            }
+        }, merge=True)
+    except Exception:
+        log.exception(f"[{brand_id}] session_open failed")
+
+
+def session_close(brand_id: str, end_reason: str | None = None) -> None:
+    """Close the session opened above. Safe to call twice."""
+    try:
+        fs.brand_doc(brand_id).set({
+            "scan": {
+                "finishedAt": SERVER_TIMESTAMP,
+                "endReason": end_reason,
+                "lastActivityAt": SERVER_TIMESTAMP,
+            }
+        }, merge=True)
+    except Exception:
+        log.exception(f"[{brand_id}] session_close failed")
+
+
+def session_is_open(brand_id: str) -> bool:
+    """Is a scan session running right now?
+
+    Guards the detect-denominator bumps. A scan that runs with no session open
+    (a scheduled sweep, or a step fired straight from the API) used to
+    Increment detectTasksEnqueued on whatever block was left on the brand doc,
+    so a finished session from last week gained a bigger denominator than its
+    frozen completions — the panel snapped back to 'analysing' and printed an
+    ETA measured from a week-old startedAt.
+    """
+    try:
+        snap = fs.brand_doc(brand_id).get()
+        scan = (snap.to_dict() or {}).get("scan") or {}
+        return bool(scan.get("startedAt")) and not scan.get("finishedAt")
+    except Exception:
+        log.exception(f"[{brand_id}] session_is_open failed")
+        return False
 
 
 def bump_detect_progress(brand_id: str, hit: bool, skipped: bool = False) -> None:

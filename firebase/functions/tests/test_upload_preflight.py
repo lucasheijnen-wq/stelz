@@ -127,5 +127,61 @@ class TestPreflightGoesFirst(unittest.TestCase):
         self.assertIn("nooit uitgerold", str(exc))
 
 
+class TestTokenIsAlwaysBurned(unittest.TestCase):
+    """The refresh token must not outlive the round that carried it.
+
+    It used to be unlinked as the LAST statement of main(), so every failure
+    path left it on disk: the 404 preflight, a 401, a dropped connection,
+    id_token_from_refresh raising. 79_verversronde.sh then calls step 78 with
+    --if-authed and no --token-file on the NEXT round, resolve_token finds the
+    leftover file (it only checks that the path exists — no freshness, no
+    ownership), exchanges it, and uploads to production under the previous
+    user, while the button that started the round says "niet ingelogd, dus
+    deze ronde blijft lokaal".
+    """
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.token_file = Path(self.dir.name) / "scrape-auth-lowlands-2026.json"
+        self.token_file.write_text(json.dumps({"refreshToken": "secret"}))
+
+    def test_a_successful_round_removes_it(self):
+        M._discard_token(self.token_file)
+        self.assertFalse(self.token_file.exists())
+
+    def test_a_failed_round_removes_it_too(self):
+        # The scenario: main() left by SystemExit from the 404 preflight. The
+        # finally-block still runs, which is the whole point of the change.
+        try:
+            try:
+                raise SystemExit(2)
+            finally:
+                M._discard_token(self.token_file)
+        except SystemExit:
+            pass
+        self.assertFalse(self.token_file.exists())
+
+    def test_no_token_file_is_not_an_error(self):
+        M._discard_token(None)
+        M._discard_token(Path(self.dir.name) / "nope.json")
+
+    def test_an_undeletable_file_does_not_crash_the_round(self):
+        with mock.patch.object(Path, "unlink", side_effect=OSError("read-only")):
+            M._discard_token(self.token_file)  # must not raise
+
+    def test_main_publishes_the_path_it_resolved(self):
+        # The finally-block reads it off the module, so main() must set it
+        # BEFORE anything that can exit — otherwise the cleanup has nothing to
+        # act on precisely on the paths that need it most.
+        src = (ROOT / "tools" / "stelz_brand_watch" / "78_upload_event.py").read_text()
+        resolve_at = src.index("token, token_path = resolve_token(args)")
+        publish_at = src.index("RESOLVED_TOKEN_PATH = token_path")
+        first_exit_after = src.index("return 2", resolve_at)
+        self.assertLess(resolve_at, publish_at)
+        self.assertLess(publish_at, first_exit_after)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

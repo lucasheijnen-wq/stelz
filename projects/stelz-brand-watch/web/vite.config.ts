@@ -191,7 +191,17 @@ function scrapeRunner() {
    *  @returns whether this round will be able to reach production. */
   const stashAuth = (ev: string, raw: string): boolean => {
     const creds = parseAuthBody(raw)
-    if (!creds) return false
+    if (!creds) {
+      // NO CREDENTIALS MEANS NO CREDENTIALS, so a leftover file from an
+      // earlier round must go. It only used to be deleted on a successful
+      // upload, so any failure — a 404 preflight, a 401, a dropped connection
+      // — left one behind; step 78 runs with --if-authed and no --token-file,
+      // finds it, and uploads to production under the PREVIOUS user, while the
+      // banner this returns false to says "niet ingelogd, dus deze ronde
+      // blijft lokaal". The banner has to be true.
+      fs.rmSync(authPath(TMP, ev), { force: true })
+      return false
+    }
     // 0600: it is a password, and .tmp is a directory people poke around in.
     fs.writeFileSync(authPath(TMP, ev), JSON.stringify(creds), { mode: 0o600 })
     return true

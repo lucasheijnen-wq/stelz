@@ -29,16 +29,35 @@
 
 import { useState } from 'react'
 import { Button } from './ui'
-import { fbStepCreators, fbStepHashtags, fbStepStories, type ScanState } from '../lib/firestore'
+import {
+  fbScanSession, fbStepCreators, fbStepHashtags, fbStepStories, type ScanState,
+} from '../lib/firestore'
 import { scanIsStale } from '../lib/scanProgress'
+// ONE APIFY BATCH PER REQUEST, and why — see lib/scanChunks. In short:
+// api_step_creators has 540 seconds and one Apify batch can take 210, so a
+// roster sent whole was a killed container rather than a slow scan.
+import { chunksOf, remainderOf } from '../lib/scanChunks'
 import { useNow } from '../lib/useNow'
 import type { Project } from '../lib/data'
 
-/** Instagram stories + both feed surfaces for a roster this size need headroom
- *  over the brand-wide defaults: 28 people is 56 creator docs across two
- *  platforms, and the default cap of 80 is shared with everyone else tracked. */
-const ROSTER_CAP = 200
 const POSTS_PER = 8
+/** Server says `more_remaining` when its own deadline cut a call short. We
+ *  repeat that chunk, but never forever: a runaway loop here spends real Apify
+ *  money on every pass. */
+const MAX_RETRIES_PER_CHUNK = 3
+
+/** Why a scan did nothing, in words. The server names the cause in `skipped`;
+ *  reporting all of them as "the backend is out of date" is the exact
+ *  misdiagnosis this component was last edited to stop. */
+function skipReason(skipped: string): string {
+  if (skipped === 'budget_exhausted') return 'Het dagbudget is op — deze scan is niet uitgevoerd.'
+  if (skipped === 'budget') return 'Het dagbudget is bijna op, dus scrapen staat uit. Deze scan is niet uitgevoerd.'
+  if (skipped === 'no_creators') {
+    return 'Geen van deze roster-profielen wordt nog gevolgd. Importeer de roster '
+      + 'opnieuw bij Instellingen.'
+  }
+  return `Scan overgeslagen: ${skipped}.`
+}
 
 export function EventScanButton({ scan, project, canWrite, loading, eventTags = [] }: {
   scan: ScanState | null
@@ -56,6 +75,7 @@ export function EventScanButton({ scan, project, canWrite, loading, eventTags = 
 }) {
   const [clicking, setClicking] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [progress, setProgress] = useState<string | null>(null)
   const [withTags, setWithTags] = useState(false)
   const now = useNow(15_000)
 
@@ -100,34 +120,90 @@ export function EventScanButton({ scan, project, canWrite, loading, eventTags = 
   const go = async () => {
     setClicking(true)
     setError(null)
+    setProgress(null)
+    // Collected, not set as we go: every step used to write straight to
+    // `error`, so the last one to speak erased what the others had found —
+    // ticking "ook hashtags" was enough to wipe a roster-scoping warning off
+    // the screen before anyone read it.
+    const notes: string[] = []
+    // Only close what we opened. With hashtags the fan-out opens its own
+    // session and its LAST tag worker closes it; closing it here would mark a
+    // scan finished while its workers were still scraping.
+    let weOpenedSession = false
     try {
-      // Stories first and unawaited: they expire after 24 hours, so they must
-      // never queue behind a creator scrape that can run for minutes.
-      void fbStepStories(ROSTER_CAP, roster)
-        .catch((e) => setError(`Stories: ${(e as Error).message}`))
-      const out = await fbStepCreators(ROSTER_CAP, POSTS_PER, roster) as { scope?: string }
-      // THE SILENT WRONG SCAN. A deployed backend that predates creatorIds
-      // ignores the field without a word and scans the brand-wide due queue
-      // instead of this roster. The new handler stamps scope:'named' when it
-      // actually used the list; its absence means the roster never reached the
-      // selection — worth a warning, not an error, because the scan that DID
-      // run is harmless, just not the one this button promises.
-      if (out.scope !== 'named') {
-        setError('De online pijplijn draait nog een oude versie zonder '
-          + 'roster-scoping — deze scan liep merkbreed, niet over deze roster. '
-          + 'Vraag om een functions-deploy.')
-      }
       if (withTags) {
         // The event's own tags when we have them. The brand pool has no
         // #lowlands in it and never should — a festival tag scraped forever
         // after the festival is pure cost — so an event scrape has to carry
         // its list rather than rely on the pool.
+        //
+        // This also opens the scan session for us: publish_tags writes the
+        // flat scan.startedAt and its LAST tag worker closes it, so we must
+        // not open or close one ourselves — marking the session finished here
+        // would call a scan done while its workers were still scraping.
         await fbStepHashtags(150, 30, eventTags.map((t) => ({ tag: t })))
+          .catch((e) => { notes.push(`Hashtags: ${(e as Error).message}`) })
+      } else {
+        await fbScanSession('open').catch(() => { /* progress only, never fatal */ })
+        weOpenedSession = true
       }
+
+      // Stories unawaited: they expire after 24 hours, so they must never
+      // queue behind a creator scrape that runs for minutes. Sized to the
+      // roster — the old ROSTER_CAP of 200 made the one stories call scrape
+      // every tier_1/tier_2 account in the brand on a backend that ignores
+      // creatorIds, at several times the intended cost.
+      void fbStepStories(roster.length, roster)
+        .catch((e) => setError(`Stories: ${(e as Error).message}`))
+
+      let scopeChecked = false
+      let done = 0
+      for (const piece of chunksOf(roster)) {
+        let chunk: string[] = piece
+        for (let attempt = 0; attempt < MAX_RETRIES_PER_CHUNK && chunk.length > 0; attempt++) {
+          const out = await fbStepCreators(chunk.length, POSTS_PER, chunk) as {
+            scope?: string; skipped?: string; more_remaining?: number
+          }
+          // THE SILENT WRONG SCAN, checked once. A backend that predates
+          // creatorIds ignores the field without a word and scans the
+          // brand-wide due queue instead of this roster. `scope` now rides on
+          // every return including the skipped ones, so its absence really
+          // does mean an old build — it no longer fires at a correctly
+          // deployed backend that merely refused for budget.
+          if (!scopeChecked) {
+            scopeChecked = true
+            if (out.scope !== 'named') {
+              notes.push('De online pijplijn draait nog een oude versie zonder '
+                + 'roster-scoping — deze scan liep merkbreed, niet over deze '
+                + 'roster. Vraag om een functions-deploy.')
+            }
+          }
+          // A refusal applies to the whole run, not just this chunk: the
+          // budget gates are brand-wide. Stop rather than pay for the rest.
+          if (out.skipped) {
+            notes.push(skipReason(out.skipped))
+            setProgress(null)
+            setError(notes.join(' '))
+            return
+          }
+          // The server ran out of its own deadline mid-chunk and says how many
+          // handles it never started. Repeat only that tail — resending the
+          // whole chunk would pay Apify twice for the ones that succeeded.
+          const rest = remainderOf(chunk, out.more_remaining)
+          done += chunk.length - rest.length
+          setProgress(`${done} van ${roster.length} profielen`)
+          chunk = rest
+        }
+      }
+      setProgress(null)
     } catch (e) {
-      setError((e as Error).message)
+      notes.push((e as Error).message)
     } finally {
+      if (weOpenedSession) {
+        await fbScanSession('close').catch(() => { /* the stall detector covers it */ })
+      }
       setClicking(false)
+      if (notes.length > 0) setError(notes.join(' '))
     }
   }
 
@@ -158,7 +234,9 @@ export function EventScanButton({ scan, project, canWrite, loading, eventTags = 
       </label>
       <span className={`text-[10px] text-right ${
         error ? 'text-[var(--color-bad)]' : 'text-[var(--color-ink-subtle)]'}`}>
-        {error ?? `${roster.length} profielen · voortgang hieronder`}
+        {/* Progress beats the idle line but never an error: a scan that went
+            wrong must not be narrated as if it were still going well. */}
+        {error ?? progress ?? `${roster.length} profielen · voortgang hieronder`}
       </span>
     </span>
   )

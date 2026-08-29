@@ -255,5 +255,84 @@ class TestDetectVideoWrapper(unittest.TestCase):
         self.assertEqual(self.bumps, [{"hit": False, "skipped": True}])
 
 
+class TestScanSession(ScanStateBase):
+    """The flat startedAt/finishedAt pair — what the whole UI calls "a scan".
+
+    Until session_open existed, exactly one code path wrote these fields
+    (scan_hashtags.publish_tags). The event button does not call hashtags, so
+    an event scan ran with no session at all: the progress panel never mounted
+    (scanPhase returns 'idle' without startedAt), the page never reloaded when
+    the scan finished, and the button never locked against a second paid press.
+    """
+
+    def test_open_marks_a_scan_running(self):
+        scan_state.session_open("stelz")
+        self.assertEqual(self.brand["scan"]["startedAt"], scan_state.SERVER_TIMESTAMP)
+        self.assertIsNone(self.brand["scan"]["finishedAt"])
+        self.assertTrue(scan_state.session_is_open("stelz"))
+
+    def test_close_ends_it(self):
+        scan_state.session_open("stelz")
+        scan_state.session_close("stelz")
+        self.assertEqual(self.brand["scan"]["finishedAt"], scan_state.SERVER_TIMESTAMP)
+        self.assertFalse(scan_state.session_is_open("stelz"))
+
+    def test_opening_resets_the_previous_run_counters(self):
+        """A session that inherited last week's totals reported this week's
+        completions against a stale denominator, so the panel snapped a
+        finished scan back to 'analysing' with an ETA off the old startedAt."""
+        self.brand["scan"] = {
+            "startedAt": "last week", "finishedAt": "also last week",
+            "detectTasksEnqueued": 1200, "detectionsCompleted": 1200,
+            "detectionsHit": 42, "skippedCount": 7,
+        }
+        scan_state.session_open("stelz")
+        self.assertEqual(self.brand["scan"]["detectTasksEnqueued"], 0)
+        self.assertEqual(self.brand["scan"]["detectionsCompleted"], 0)
+        self.assertEqual(self.brand["scan"]["detectionsHit"], 0)
+        self.assertEqual(self.brand["scan"]["skippedCount"], 0)
+
+    def test_no_session_at_all_is_not_open(self):
+        self.assertFalse(scan_state.session_is_open("stelz"))
+
+    def test_a_session_never_closed_still_counts_as_open(self):
+        # The stall detector, not this function, is what calls time on those.
+        self.brand["scan"] = {"startedAt": "ages ago", "finishedAt": None}
+        self.assertTrue(scan_state.session_is_open("stelz"))
+
+
+class TestStepSkipped(ScanStateBase):
+    """A handler that refused is not a step that succeeded.
+
+    Every skipped return carries a reason (budget_exhausted, budget,
+    no_creators). Painting those green said a scan had run when the budget gate
+    had turned it away — a brand could look scanned all week with not one
+    request having left the building.
+    """
+
+    def test_skipped_is_its_own_state_and_keeps_the_reason(self):
+        scan_state.step_started("stelz", "creators")
+        scan_state.step_skipped("stelz", "creators", "budget_exhausted", {"posts_added": 0})
+        step = self.brand["scan"]["steps"]["creators"]
+        self.assertEqual(step["state"], "skipped")
+        self.assertEqual(step["error"], "budget_exhausted")
+        self.assertEqual(step["finishedAt"], scan_state.SERVER_TIMESTAMP)
+
+    def test_skipped_is_not_done(self):
+        scan_state.step_started("stelz", "creators")
+        scan_state.step_skipped("stelz", "creators", "no_creators")
+        self.assertNotEqual(self.brand["scan"]["steps"]["creators"]["state"], "done")
+
+    def test_a_failing_write_is_swallowed(self):
+        # Same contract as every other function here: progress reporting must
+        # never be the reason a scan fails.
+        with mock.patch.object(scan_state, "fs", types.SimpleNamespace(
+                brand_doc=lambda bid: (_ for _ in ()).throw(RuntimeError("no db")))):
+            scan_state.session_open("stelz")
+            scan_state.session_close("stelz")
+            scan_state.step_skipped("stelz", "creators", "budget")
+            self.assertFalse(scan_state.session_is_open("stelz"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

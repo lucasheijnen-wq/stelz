@@ -66,6 +66,12 @@ _espec.loader.exec_module(E)
 
 DEFAULT_BASE = "https://europe-west1-brand-audit-4b2cc.cloudfunctions.net"
 BRAND_ID = "stelz"
+
+# The credential file this run resolved, if any. Set by main() and read by the
+# finally-block at the bottom, which burns it on EVERY exit path — see
+# _discard_token. Module scope rather than a return value because main() can
+# leave by SystemExit from half a dozen places.
+RESOLVED_TOKEN_PATH = None
 ROWS_PER_CALL = 300
 # Firebase's public token endpoint: refresh token in, fresh ID token out.
 SECURE_TOKEN = "https://securetoken.googleapis.com/v1/token"
@@ -322,6 +328,11 @@ def main() -> int:
         return 0
 
     token, token_path = resolve_token(args)
+    # Published on the module so the finally-block at the bottom can burn the
+    # file no matter how main() exits — see _discard_token for why every exit
+    # path matters here.
+    global RESOLVED_TOKEN_PATH
+    RESOLVED_TOKEN_PATH = token_path
     if not token:
         # Not a failure when the caller said so. The verversronde marks a round
         # as clean only when EVERY step exited 0, and "nobody is logged in on
@@ -422,18 +433,36 @@ def main() -> int:
         })
         print("  publiek-samenvatting geschreven")
 
-    # The refresh token is a long-lived login secret and it has now done its one
-    # job. The next round gets a fresh one from the browser at the click.
+    print(f"\n  klaar — open /evenementen/{ev['id']} op de productie-URL; "
+          "de teller daar hoort gelijk te zijn aan 77_voortgang lokaal")
+    return 0
+
+
+def _discard_token(token_path) -> None:
+    """Burn the refresh token, whatever happened.
+
+    It is a long-lived login secret and it has done its one job. This used to
+    be the last statement of main(), which meant EVERY failure path left it on
+    disk: the 404 preflight, a 401, a dropped connection, id_token_from_refresh
+    raising. 79_verversronde.sh calls step 78 with --if-authed and no
+    --token-file, so the next round finds that leftover file, exchanges it, and
+    uploads to production under the previous user's identity — while the button
+    that started it says "niet ingelogd, dus deze ronde blijft lokaal".
+
+    resolve_token only checks that the path exists; there is no freshness or
+    ownership check to catch it downstream, so the cleanup has to be total.
+    """
     if token_path and token_path.exists():
         try:
             token_path.unlink()
         except OSError:
             print(f"  let op: {token_path.name} kon niet worden opgeruimd")
 
-    print(f"\n  klaar — open /evenementen/{ev['id']} op de productie-URL; "
-          "de teller daar hoort gelijk te zijn aan 77_voortgang lokaal")
-    return 0
-
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    finally:
+        # main() records the path it resolved on the module so this can find it
+        # even when main() left by an exception.
+        _discard_token(RESOLVED_TOKEN_PATH)

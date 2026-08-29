@@ -1016,6 +1016,19 @@ def _persist_hashtag_post(
     )
 
 
+def _slot_of(child: dict) -> int | None:
+    """A carousel slide's position, where slide ONE is 0.
+
+    Explicit None checks rather than `or`, because 0 is falsy and 0 is a real
+    slot — the first slide of every carousel, and the one the cover comes from.
+    """
+    for key in ("order", "position"):
+        v = child.get(key)
+        if v is not None:
+            return v
+    return None
+
+
 def _persist_sidecar_child(
     brand_id: str,
     parent: dict,
@@ -1053,14 +1066,29 @@ def _persist_sidecar_child(
         "platform": "instagram",
         "externalId": child_id,
         "parentPostId": parent_id,
-        "carouselSlot": child.get("order") or child.get("position"),
+        # `or` was wrong here: slot 0 is falsy, so the FIRST slide of every
+        # carousel was stored with no slot at all. That is the slide the cover
+        # image comes from, and a null slot does not match the imported row's
+        # explicit 0 — so slide one of every carousel deduped against nothing.
+        "carouselSlot": _slot_of(child),
+        # THE PARENT'S key, deliberately shared by every slide of the carousel.
+        # The metrics below are the parent's, copied onto each slide so a slide
+        # can show its post's numbers — which meant a ten-slide carousel with
+        # 500 likes reported 5.000 when the rollup counted per row. Slides that
+        # agree on postKey collapse to one post before any count is taken, the
+        # same rule parentPostKey() already applies to detections. `slot` is
+        # what the web client reads; carouselSlot above stays for the callers
+        # that already read it.
+        "postKey": (parent.get("shortCode") or "").lower() or None,
+        "slot": _slot_of(child),
         "url": parent.get("url"),
         "caption": (parent.get("caption") or "")[:2000],
         "hashtags": [h.lower() for h in (parent.get("hashtags") or [])],
         "postedAt": posted_at,
-        "likesCount": parent.get("likesCount") or 0,
-        "commentsCount": parent.get("commentsCount") or 0,
-        "viewsCount": parent.get("videoViewCount") or 0,
+        # Absent is not zero — see the same note in scan_creators._persist_post.
+        "likesCount": parent.get("likesCount"),
+        "commentsCount": parent.get("commentsCount"),
+        "viewsCount": parent.get("videoViewCount"),
         "contentType": "video" if is_video else "image",
         "videoUrl": video_url,
         "coverUrl": image_url,

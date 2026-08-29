@@ -139,11 +139,18 @@ class ScanCreatorsBase(unittest.TestCase):
         self.apify = mock.Mock()
         self.apify.scrape_profile_ig = mock.Mock(return_value=[])
         self.apify.run_sync = mock.Mock(return_value=[])
+        # A session is open unless a test says otherwise: the denominator bump
+        # is gated on one, because bumping a CLOSED session raises the total of
+        # a scan whose completions are frozen.
+        self.session_open = True
+        self.scan_state = types.SimpleNamespace(
+            session_is_open=lambda bid: self.session_open)
 
         patches = [
             mock.patch.object(scan_creators, "fs", fake_fs),
             mock.patch.object(scan_creators, "usage", self.usage),
             mock.patch.object(scan_creators, "apify", self.apify),
+            mock.patch.object(scan_creators, "scan_state", self.scan_state),
             # Persistence is scan-pipeline plumbing, not what these tests pin.
             mock.patch.object(scan_creators, "_persist_post", lambda *a, **k: None),
             mock.patch.object(scan_creators, "_audit_creators_scrape", lambda *a, **k: None),
@@ -168,7 +175,6 @@ class TestBillingIsRecorded(ScanCreatorsBase):
         self.assertEqual(len(self.recorded), 1)
         self.assertEqual(self.recorded[0].get("apify_ig_results"), 5)
         self.assertEqual(self.recorded[0].get("apify_runs"), 1)
-        self.assertEqual(self.recorded[0].get("apify_tt_results"), 0)
 
     def test_tiktok_results_are_recorded_too(self):
         self.creators["tiktok_carla"] = {
@@ -177,7 +183,212 @@ class TestBillingIsRecorded(ScanCreatorsBase):
         self.apify.run_sync.return_value = [{"id": str(i)} for i in range(3)]
         self.run_scan()
         self.assertEqual(self.recorded[0].get("apify_tt_results"), 3)
-        self.assertEqual(self.recorded[0].get("apify_ig_results"), 0)
+
+    def test_instagram_is_billed_once_per_batch_not_once_per_run(self):
+        """Recording after the loop meant a killed container recorded nothing.
+
+        The function's own budget guards read the counter this feeds, so a scan
+        that spent money and died on the timeout wall left the ladder believing
+        it had spent nothing — and the next press started from that same wrong
+        number."""
+        for i in range(25):  # three batches of ten
+            self.creators[f"instagram_a{i}"] = {
+                "status": "discovered", "platform": "instagram",
+                "handle": f"a{i}", "nextScanAt": PAST,
+            }
+        self.apify.scrape_profile_ig.return_value = [{"id": "1"}, {"id": "2"}]
+        self.run_scan(max_creators=25)
+        ig = [r for r in self.recorded if "apify_ig_results" in r]
+        self.assertEqual(len(ig), 3, "one record per batch, not one for the run")
+        self.assertTrue(all(r["apify_ig_results"] == 2 and r["apify_runs"] == 1 for r in ig))
+
+    def test_instagram_is_not_billed_twice_for_the_same_batch(self):
+        """The per-batch record replaced the end-of-run one; leaving both in
+        would tell the ladder the scan cost double what it did."""
+        self.creators["instagram_anna"] = {
+            "status": "discovered", "platform": "instagram", "handle": "anna", "nextScanAt": PAST,
+        }
+        self.apify.scrape_profile_ig.return_value = [{"id": "1"}]
+        self.run_scan()
+        self.assertEqual(sum(r.get("apify_ig_results", 0) for r in self.recorded), 1)
+
+
+class TestPartialWorkSurvives(ScanCreatorsBase):
+    """The heart of it: a batch that has been paid for must reach disk.
+
+    scan_creators used to accumulate every batch in memory and persist the lot
+    after the loop. api_step_creators is deployed with timeout_sec=540 and one
+    Apify batch can take 210s, so a roster needing three batches was killed
+    mid-loop — Apify had billed for two of them and Firestore received nothing.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.persisted: list[str] = []
+        p = mock.patch.object(
+            scan_creators, "_persist_post",
+            lambda bid, item, plat, cbh, pc, ni: self.persisted.append(item["id"]))
+        p.start()
+        self.addCleanup(p.stop)
+        for i in range(25):  # three batches
+            self.creators[f"instagram_a{i}"] = {
+                "status": "discovered", "platform": "instagram",
+                "handle": f"a{i}", "nextScanAt": PAST,
+            }
+
+    def test_every_batch_is_on_disk_before_the_next_one_starts(self):
+        """A container kill cannot be raised as an exception — the process is
+        simply gone, and the loop deliberately swallows per-batch errors so one
+        bad batch cannot end a round. So pin the property that makes a kill
+        survivable instead: when batch N begins, batches 1..N-1 are already
+        written. Under the old code this list read [0, 0, 0] — everything was
+        still in memory waiting for a persist pass that a killed container
+        never reached."""
+        seen_before_each_batch: list[int] = []
+        calls = {"n": 0}
+
+        def observe(batch, posts_per):
+            seen_before_each_batch.append(len(self.persisted))
+            calls["n"] += 1
+            return [{"id": f"batch{calls['n']}"}]
+
+        self.apify.scrape_profile_ig.side_effect = observe
+        self.run_scan(max_creators=25)
+        self.assertEqual(seen_before_each_batch, [0, 1, 2])
+        self.assertEqual(self.persisted, ["batch1", "batch2", "batch3"])
+
+    def test_the_guard_above_can_actually_fail(self):
+        """If persistence moved back behind the loop this test would pass
+        vacuously, so prove the fixture reaches the assert at all."""
+        self.apify.scrape_profile_ig.return_value = [{"id": "x"}]
+        self.run_scan(max_creators=25)
+        self.assertEqual(len(self.persisted), 3)
+
+
+class TestPostIdentity(unittest.TestCase):
+    """What _persist_post writes about a post's identity and its numbers.
+
+    Two defects, both of which corrupt the event page's arithmetic rather than
+    breaking it visibly:
+
+    1. THE DOC ID IS NOT SHARED between write paths and never can be.
+       78_upload_event names an Instagram post instagram_<shortCode>; this
+       scanner names the same post instagram_<numeric id> through composite_id,
+       which also lowercases. The two cannot collide, so once an online scan ran
+       over already-imported rows, every roster post was counted twice — in the
+       flattering direction, with nothing on screen to show it. A shared
+       postKey dedupes them without renaming anything already in Firestore.
+
+    2. `or 0` TURNED "NOT PUBLISHED" INTO "ZERO". Instagram omits
+       videoViewCount on every photo and omits like counts when they are
+       hidden. The KPI tiles average over posts that carry a number, so a photo
+       claiming zero views dragged down the mean of every video beside it.
+    """
+
+    def _write(self, item: dict, platform: str = "instagram") -> dict:
+        written: dict = {}
+
+        class Sink:
+            """Swallows the images subcollection and anything else the persist
+            touches; only the POST document is under test here."""
+
+            def set(self, doc, merge=False):
+                pass
+
+            def document(self, _id=None):
+                return self
+
+            def collection(self, _name):
+                return self
+
+        class FakeDoc(Sink):
+            def set(self_inner, doc, merge=False):
+                written.update(doc)
+
+        posts_col = types.SimpleNamespace(document=lambda pid: FakeDoc())
+        creator_ref = types.SimpleNamespace(path="brands/stelz/creators/instagram_anna",
+                                            update=lambda d: None)
+        with mock.patch.object(scan_creators, "fs", types.SimpleNamespace(
+            composite_id=lambda *p: "_".join(x.lower() for x in p if x),
+        )), mock.patch.dict(sys.modules, {"handlers.scan_hashtags": types.SimpleNamespace(
+            _tagged_users=lambda it: [], _tiktok_music_url=lambda a, b: None)}):
+            scan_creators._persist_post(
+                "stelz", item, platform,
+                {"anna": (creator_ref, {})}, posts_col, [])
+        return written
+
+    def test_the_shortcode_is_written_as_the_shared_key(self):
+        doc = self._write({
+            "id": "3944857960016114445", "shortCode": "Da-82n0IfMN",
+            "ownerUsername": "anna", "displayUrl": "http://x/a.jpg",
+        })
+        self.assertEqual(doc["postKey"], "da-82n0ifmn",
+                         "lowercased, or it will never match composite_id's output")
+        self.assertEqual(doc["externalId"], "3944857960016114445",
+                         "the doc id scheme itself must NOT change — that would "
+                         "split the rows already in Firestore")
+
+    def test_a_photo_reports_no_view_count_rather_than_zero(self):
+        doc = self._write({
+            "id": "1", "shortCode": "AAA", "ownerUsername": "anna",
+            "displayUrl": "http://x/a.jpg", "likesCount": 12,
+        })
+        self.assertIsNone(doc["viewsCount"])
+        self.assertEqual(doc["likesCount"], 12)
+
+    def test_a_genuine_zero_is_still_written_as_zero(self):
+        doc = self._write({
+            "id": "1", "shortCode": "AAA", "ownerUsername": "anna",
+            "type": "Video", "videoUrl": "http://x/v.mp4",
+            "videoViewCount": 0, "likesCount": 0,
+        })
+        self.assertEqual(doc["viewsCount"], 0)
+        self.assertEqual(doc["likesCount"], 0)
+
+    def test_hidden_like_counts_stay_absent(self):
+        doc = self._write({
+            "id": "1", "shortCode": "AAA", "ownerUsername": "anna",
+            "displayUrl": "http://x/a.jpg",
+        })
+        self.assertIsNone(doc["likesCount"])
+        self.assertIsNone(doc["commentsCount"])
+
+    def test_tiktok_keys_on_its_numeric_id(self):
+        doc = self._write({
+            "id": "77123", "authorMeta": {"name": "anna"},
+            "videoMeta": {"coverUrl": "http://x/c.jpg"}, "playCount": 900,
+        }, platform="tiktok")
+        self.assertEqual(doc["postKey"], "77123")
+        self.assertEqual(doc["viewsCount"], 900)
+
+
+class TestDeadline(ScanCreatorsBase):
+    """Stop before the wall instead of being killed at it."""
+
+    def setUp(self):
+        super().setUp()
+        for i in range(25):  # three batches of ten
+            self.creators[f"instagram_a{i}"] = {
+                "status": "discovered", "platform": "instagram",
+                "handle": f"a{i}", "nextScanAt": PAST,
+            }
+        self.apify.scrape_profile_ig.return_value = [{"id": "1"}]
+
+    def test_a_batch_that_would_not_fit_is_never_started(self):
+        # Clock jumps 200s per reading, so after two batches there is no room
+        # for a third: 400 + 210 + 30 > 480.
+        ticks = iter([0, 0, 200, 400, 600, 800, 1000, 1200])
+        with mock.patch.object(scan_creators.time, "monotonic", lambda: next(ticks)):
+            out = self.run_scan(max_creators=25)
+        self.assertEqual(self.apify.scrape_profile_ig.call_count, 2)
+        self.assertEqual(out["more_remaining"], 5,
+                         "the caller must be told what was left, or a truncated "
+                         "scan looks exactly like a complete one")
+
+    def test_a_scan_that_finishes_reports_nothing_remaining(self):
+        out = self.run_scan(max_creators=25)
+        self.assertEqual(self.apify.scrape_profile_ig.call_count, 3)
+        self.assertEqual(out["more_remaining"], 0)
 
 
 class TestBudgetGates(ScanCreatorsBase):
@@ -341,6 +552,30 @@ class TestDetectDenominator(ScanCreatorsBase):
         bumps = [p["scan"]["detectTasksEnqueued"]
                  for p in brand_sets if "scan" in p]
         self.assertEqual(bumps, [("INC", 2)])
+
+    def test_no_bump_when_no_session_is_open(self):
+        """A closed session's completions are frozen. Raising its denominator
+        flips a scan that finished last week back to 'analysing' and prints an
+        ETA computed from its week-old startedAt."""
+        self.session_open = False
+        brand_sets: list[dict] = []
+        fake_brand = types.SimpleNamespace(
+            get=lambda: mock.Mock(exists=True),
+            set=lambda payload, merge=False: brand_sets.append(payload))
+        scan_creators.fs.brand_doc = lambda bid: fake_brand
+        self.creators["instagram_anna"] = {
+            "status": "discovered", "platform": "instagram", "handle": "anna",
+            "nextScanAt": PAST,
+        }
+        self.apify.scrape_profile_ig.return_value = [{"id": "1"}]
+        with mock.patch.object(
+            scan_creators, "_persist_post",
+            lambda bid, item, plat, cbh, pc, ni: ni.append(("instagram_1", "image", "http://a")),
+        ), mock.patch.object(scan_creators, "pubsub_v1", types.SimpleNamespace(
+            PublisherClient=lambda: _CountingPublisher()),
+        ), mock.patch.object(scan_creators, "Increment", lambda n: ("INC", n)):
+            scan_creators.run("stelz", dry_run=False)
+        self.assertEqual([p for p in brand_sets if "scan" in p], [])
 
 
 class _CountingPublisher:

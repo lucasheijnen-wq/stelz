@@ -447,3 +447,64 @@ describe('surfaceOf', () => {
     expect(surfaceOf({ surface: 'reel' })).toBe('post')
   })
 })
+
+describe('a carousel is one post, not one per slide', () => {
+  // The sidecar writer copies the PARENT'S like count onto every slide,
+  // because that is the only like count the post has. The rollup keys on
+  // postKey, so a slide whose postKey was null fell back to its own doc id —
+  // unique per slide — and a ten-slide carousel with 500 likes reported 5.000.
+  // firestore.mapEventPost now fills postKey in from the row (see
+  // postIdentity.postKeyOf), which is what makes this collapse happen.
+  const slide = (slot: number) => item({
+    itemId: `instagram_P123_C${slot}`,
+    postKey: 'da-82n0ifmn',
+    slot,
+    creatorHandle: 'anna',
+    surface: 'post',
+    platform: 'instagram',
+    likes: 500,
+  })
+
+  it('counts the likes once across ten slides', () => {
+    const rows = joinCampaign([...Array(10).keys()].map(slide), [])
+    expect(campaignRollup(rows).postLikes).toBe(500)
+  })
+
+  it('counts the post once', () => {
+    const rows = joinCampaign([...Array(10).keys()].map(slide), [])
+    expect(campaignRollup(rows).bySurface.post.posts).toBe(1)
+  })
+
+  it('overcounts when postKey is missing — which is the bug postIdentity fixes', () => {
+    // Not aspirational: this is what production did. Every slide arrived with
+    // postKey null, joinCampaign fell back to the per-slide itemId, and the
+    // parent's 500 likes were added once per slide. Kept as a test so the
+    // contrast above cannot quietly stop meaning anything — if this ever
+    // reports 500 too, the collapse is happening for some other reason and
+    // the test above proves nothing.
+    const rows = joinCampaign([...Array(10).keys()].map((slot) => item({
+      itemId: `instagram_P123_C${slot}`,
+      creatorHandle: 'anna', surface: 'post', platform: 'instagram', likes: 500,
+    })), [])
+    expect(campaignRollup(rows).postLikes).toBe(5_000)
+  })
+
+  it('still counts two different posts as two', () => {
+    const rows = joinCampaign([
+      item({ itemId: 'a', postKey: 'aaa', creatorHandle: 'anna', surface: 'post', likes: 100 }),
+      item({ itemId: 'b', postKey: 'bbb', creatorHandle: 'anna', surface: 'post', likes: 200 }),
+    ], [])
+    expect(campaignRollup(rows).postLikes).toBe(300)
+    expect(campaignRollup(rows).bySurface.post.posts).toBe(2)
+  })
+
+  it('keeps the slides apart when they are genuinely different posts', () => {
+    // Same account, unrelated shortcodes. Without the account scoping in
+    // joinCampaign's postKey a shortcode collision would merge two posts.
+    const rows = joinCampaign([
+      item({ itemId: 'x', postKey: 'aaa', creatorHandle: 'anna', surface: 'post', likes: 10 }),
+      item({ itemId: 'y', postKey: 'aaa', creatorHandle: 'bob', surface: 'post', likes: 20 }),
+    ], [])
+    expect(campaignRollup(rows).postLikes).toBe(30)
+  })
+})

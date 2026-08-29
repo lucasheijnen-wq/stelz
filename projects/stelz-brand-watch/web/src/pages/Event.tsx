@@ -119,7 +119,7 @@ function EventBody({ ev, params, setParams }: {
   // scheduled cloud scans wrote inside this event's window. One hook, one
   // merged set, same downstream pipeline. See lib/eventData.
   const { items: campaignItems, detections: campaignDetections,
-          sources, preview, loading: campaignLoading,
+          sources, preview, loading: campaignLoading, truncated: campaignTruncated,
           reload: reloadCampaign } = useEventCampaign(ev.id)
 
   // The online scan's progress, straight off the brand doc — the same stream
@@ -314,9 +314,17 @@ function EventBody({ ev, params, setParams }: {
           over a harvested festival is a lie with a card around it. */}
       {!campaignLoading && <Card className="mb-4 px-4 py-3 text-[12px] text-[var(--color-ink-muted)] leading-relaxed border-l-2 border-[var(--color-border-strong)]">
         <strong className="font-medium text-[var(--color-ink)]">
+          {campaignTruncated ? 'Minstens ' : ''}
           {fmtNum(rows.length)} van {fmtNum(allRows.length)} stuks content vallen binnen{' '}
           {formatWindow(ev)}.
         </strong>{' '}
+        {/* A query came back exactly at its row cap, so this total is a floor
+            and not the answer. Printing it as fact is how a page that is
+            missing rows still looks authoritative. */}
+        {campaignTruncated && (
+          <>Een van de queries raakte zijn limiet van 8.000 rijen, dus dit is een
+          ondergrens: er valt meer binnen deze periode dan hier geteld wordt.{' '}</>
+        )}
         {outside > 0 && (
           <>De overige {fmtNum(outside)} vallen erbuiten: ouder of nieuwer, of wél uit
           deze dagen maar van accounts die niets met {ev.name} te maken hebben — de

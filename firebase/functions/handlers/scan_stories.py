@@ -31,7 +31,7 @@ from typing import Any
 from google.cloud import pubsub_v1
 from google.cloud.firestore import SERVER_TIMESTAMP, Increment
 
-from lib import apify, fs, usage
+from lib import apify, fs, scan_state, usage
 
 log = logging.getLogger(__name__)
 
@@ -268,8 +268,13 @@ def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = F
     if not brand.exists:
         raise ValueError(f"brand not found: {brand_id}")
 
+    # `scope` rides on EVERY return, the do-nothing ones included. The event
+    # button reads its absence as "this backend predates creator_ids" and says
+    # so in red, so a scan skipped for budget used to make a correctly deployed
+    # backend accuse itself of not being deployed.
     zero = {"accountsChecked": 0, "storiesFound": 0, "imagesEnqueued": 0,
-            "videosEnqueued": 0, "skippedNonStory": 0}
+            "videosEnqueued": 0, "skippedNonStory": 0,
+            "scope": "named" if creator_ids is not None else "tier"}
     if usage.budget_exhausted(brand_id):
         _mark_run(brand_id, found=0, checked=0, skipped="budget_exhausted")
         return {**zero, "skipped": "budget_exhausted"}
@@ -360,6 +365,14 @@ def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = F
             "creatorTier": cd.get("tier"),
             "platform": "instagram",
             "externalId": f"story_{story_id}",
+            # The shared cross-path key. Stories are the one surface where the
+            # two writers already agreed on the doc id, so this changes no
+            # grouping — but the web client now dedupes on postKey where a row
+            # has one, and 78_upload_event sends it for every story it
+            # uploads. A scanner row without it would fall back to the doc id
+            # while its imported twin keyed on the story id, and the pair that
+            # used to be one row would become two.
+            "postKey": str(story_id).lower(),
             # A story permalink, not the raw CDN image: "open original" on a
             # story should look like a story, not like a stray JPEG.
             "url": f"https://www.instagram.com/stories/{handle}/{story_id}/",
@@ -376,8 +389,13 @@ def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = F
             "videoUrl": norm["video_url"],
             "videoDuration": norm["video_duration"],
             "coverUrl": norm["image_url"],
-            "likesCount": 0,
-            "commentsCount": 0,
+            # Not zero either, and for the same reason as viewsCount below: a
+            # story carries no public like or comment count, so 0 would state
+            # that nobody engaged. The KPI tiles average over posts that carry
+            # a number, so a zero here drags down the mean of every post that
+            # really was measured.
+            "likesCount": None,
+            "commentsCount": None,
             # NOT zero. Instagram shows story views to the account owner only
             # (`can_see_insights_as_brand` is false on every item), so we do not
             # know this number. Writing 0 states that nobody watched, which is
@@ -446,7 +464,12 @@ def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = F
         # Same denominator rule as scan_creators: the detect workers count
         # completions from every path, so every path that enqueues must also
         # count — but only when a person is watching this scan session.
-        if session_counters and images_enqueued + videos_enqueued > 0:
+        # session_is_open as well as the flag: the caller asking for counters
+        # is not proof a session is actually open, and bumping a CLOSED one
+        # raises a denominator whose completions are frozen — the panel snaps a
+        # finished scan back to 'analysing' with an ETA off its old startedAt.
+        if (session_counters and images_enqueued + videos_enqueued > 0
+                and scan_state.session_is_open(brand_id)):
             fs.brand_doc(brand_id).set({"scan": {
                 "detectTasksEnqueued": Increment(images_enqueued + videos_enqueued),
                 "lastActivityAt": SERVER_TIMESTAMP,

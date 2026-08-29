@@ -173,10 +173,15 @@ class StoriesBase(unittest.TestCase):
         )
         self.apify = mock.Mock()
         self.apify.run_sync = mock.Mock(return_value=[])
+        self.session_open = True
         for p in (
             mock.patch.object(scan_stories, "fs", fake_fs),
             mock.patch.object(scan_stories, "usage", self.usage),
             mock.patch.object(scan_stories, "apify", self.apify),
+            # Open unless a test says otherwise — the denominator bump is gated
+            # on a live session as well as on the caller's flag.
+            mock.patch.object(scan_stories, "scan_state", types.SimpleNamespace(
+                session_is_open=lambda bid: self.session_open)),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -485,6 +490,27 @@ class TestPublicMetrics(StoriesBase):
     def doc(self):
         return self.posts["instagram_story31415926535"]
 
+    def test_the_story_id_is_written_as_the_shared_key(self):
+        """Stories are the one surface where both writers already agreed on
+        the doc id, so they deduped for free. The web client now collapses on
+        postKey WHERE A ROW HAS ONE, and 78_upload_event sends it for every
+        story — so a scanner row without it would key on its doc id while its
+        imported twin keyed on the story id, and a pair that used to be one row
+        would silently become two."""
+        self.apify.run_sync.return_value = [STORY]
+        self.run_stories()
+        self.assertEqual(self.doc()["postKey"], "31415926535")
+
+    def test_likes_and_comments_are_null_not_zero(self):
+        # Same rule as viewsCount below: a story carries no public like or
+        # comment count, and the KPI tiles average over posts that carry a
+        # number — so a zero here drags down the mean of every post that really
+        # was measured.
+        self.apify.run_sync.return_value = [STORY]
+        self.run_stories()
+        self.assertIsNone(self.doc()["likesCount"])
+        self.assertIsNone(self.doc()["commentsCount"])
+
     def test_views_are_null_not_zero(self):
         # Zero is a claim — "nobody watched" — and it would be read straight
         # into a client report. Unknown is the truth.
@@ -675,6 +701,17 @@ class TestSessionCounters(StoriesBase):
 
     def test_scheduled_sweep_leaves_the_panel_alone(self):
         out = self._run_live()  # session_counters defaults to False
+        self.assertEqual(out["imagesEnqueued"], 1)
+        self.assertEqual([s for s in self.brand_scan_writes()
+                          if "detectTasksEnqueued" in s], [])
+
+    def test_no_bump_when_the_session_is_closed(self):
+        """The caller asking for counters is not proof a session is open. A
+        closed session's completions are frozen, so raising its denominator
+        snaps a finished scan back to 'analysing' and prints an ETA measured
+        from a startedAt that may be days old."""
+        self.session_open = False
+        out = self._run_live(session_counters=True)
         self.assertEqual(out["imagesEnqueued"], 1)
         self.assertEqual([s for s in self.brand_scan_writes()
                           if "detectTasksEnqueued" in s], [])
