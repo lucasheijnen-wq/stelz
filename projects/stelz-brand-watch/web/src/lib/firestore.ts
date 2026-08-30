@@ -653,6 +653,23 @@ export async function fbStepHashtags(
     brandId: BRAND_ID, perTag, maxTags, ...(tags?.length ? { tags } : {}),
   })
 }
+/**
+ * Re-enqueue analysis for media that never produced a verdict.
+ *
+ * The detect triggers deploy with retry=false, so a worker killed by its
+ * container deadline takes its message with it and nothing redelivers — and
+ * scan.detectTasksEnqueued cannot say WHICH images are missing, because it
+ * counts publish attempts. The server finds the gap in the data instead:
+ * posts with no detection document, which is reliable because detect_image
+ * writes one on every completed analysis, misses included.
+ *
+ * No Apify spend at all: this re-analyses media already harvested.
+ */
+export async function fbResumeAnalysis(opts: {
+  sinceDays?: number; maxPosts?: number; dryRun?: boolean
+} = {}) {
+  return authedFetch('api_resume_analysis', { brandId: BRAND_ID, ...opts })
+}
 // Open or close the flat scan session (scan.startedAt/finishedAt). Only
 // publish_tags used to write those, so a scan that skips hashtags — every
 // event scan — ran with no session: no progress panel, no post-scan reload,
@@ -1042,15 +1059,61 @@ function mapScanSteps(raw: unknown): Partial<Record<ScanStepKey, ScanStep>> {
   return out
 }
 
+/**
+ * The detect counters live in a SHARDED subcollection — see lib/scan_state.
+ *
+ * They used to be three Increments on the brand document, written once per
+ * detect message: ~9.500 of them for a festival scan, from up to 75 containers
+ * at once, against a document Firestore sustains about one write per second
+ * to. Losers of that fight were swallowed by bump_detect_progress's own
+ * except, which is what "9290 van 9573" really was — not dead workers, but
+ * counter writes that never landed. Twenty shards spread the load.
+ *
+ * The shard sums are ADDED to the flat counters rather than replacing them, so
+ * a session written by the pre-shard backend still reads correctly: its shards
+ * are empty and its flat values stand. That also means this works before the
+ * functions deploy lands.
+ */
+type ShardTotals = {
+  detectionsCompleted: number
+  detectionsHit: number
+  skippedCount: number
+  lastActivityAt: string | null
+}
+
+const NO_SHARDS: ShardTotals = {
+  detectionsCompleted: 0, detectionsHit: 0, skippedCount: 0, lastActivityAt: null,
+}
+
+function sumShards(snap: QuerySnapshot<DocumentData>): ShardTotals {
+  const out: ShardTotals = { ...NO_SHARDS }
+  for (const d of snap.docs) {
+    const x = d.data()
+    out.detectionsCompleted += (x.detectionsCompleted as number) ?? 0
+    out.detectionsHit += (x.detectionsHit as number) ?? 0
+    out.skippedCount += (x.skippedCount as number) ?? 0
+    const t = x.lastActivityAt instanceof Timestamp ? x.lastActivityAt.toDate().toISOString() : null
+    // The most recent shard write IS the heartbeat during the detect phase;
+    // without it the stall detector sees a frozen brand document and calls a
+    // healthy fan-out dead.
+    if (t && (!out.lastActivityAt || t > out.lastActivityAt)) out.lastActivityAt = t
+  }
+  return out
+}
+
 export function fbSubscribeScanState(
   onChange: (state: ScanState | null) => void,
   brandId = BRAND_ID,
 ): Unsubscribe {
   const ref = doc(fbDb, 'brands', brandId)
-  return onSnapshot(ref, (snap) => {
-    const x = snap.data()
-    const s = (x?.scan ?? null) as Record<string, unknown> | null
+  let shards: ShardTotals = NO_SHARDS
+  let latest: Record<string, unknown> | null = null
+
+  const emit = () => {
+    const s = latest
     if (!s) { onChange(null); return }
+    const flatActivity = s.lastActivityAt instanceof Timestamp
+      ? s.lastActivityAt.toDate().toISOString() : null
     onChange({
       startedAt: s.startedAt instanceof Timestamp ? s.startedAt.toDate().toISOString() : null,
       finishedAt: s.finishedAt instanceof Timestamp ? s.finishedAt.toDate().toISOString() : null,
@@ -1059,13 +1122,19 @@ export function fbSubscribeScanState(
       hashtagDone: (s.hashtagDone as number) ?? 0,
       postsWritten: (s.postsWritten as number) ?? 0,
       detectTasksEnqueued: (s.detectTasksEnqueued as number) ?? 0,
-      detectionsCompleted: (s.detectionsCompleted as number) ?? 0,
-      detectionsHit: (s.detectionsHit as number) ?? 0,
+      detectionsCompleted: ((s.detectionsCompleted as number) ?? 0) + shards.detectionsCompleted,
+      detectionsHit: ((s.detectionsHit as number) ?? 0) + shards.detectionsHit,
       tags: (s.tags as string[]) ?? [],
-      lastActivityAt: s.lastActivityAt instanceof Timestamp ? s.lastActivityAt.toDate().toISOString() : null,
-      skippedCount: (s.skippedCount as number) ?? 0,
+      lastActivityAt: [flatActivity, shards.lastActivityAt]
+        .filter((v): v is string => v != null).sort().pop() ?? null,
+      skippedCount: ((s.skippedCount as number) ?? 0) + shards.skippedCount,
       endReason: (s.endReason as string) ?? null,
     })
+  }
+
+  const stopDoc = onSnapshot(ref, (snap) => {
+    latest = (snap.data()?.scan ?? null) as Record<string, unknown> | null
+    emit()
   }, (err) => {
     // Without this callback a rules change or dropped index makes the scan
     // panel silently blank forever — the exact shape of failure the panel
@@ -1073,6 +1142,18 @@ export function fbSubscribeScanState(
     console.error('scan-state subscription failed', err)
     onChange(null)
   })
+
+  // A second subscription rather than a periodic read: the shards move once
+  // per analysed image, and the bar has to follow them. Its failure is NOT
+  // fatal — an old backend has no such collection, and a rules change must
+  // degrade to the flat counters rather than blank the panel.
+  const stopShards = onSnapshot(
+    collection(fbDb, 'brands', brandId, 'scanShards'),
+    (snap) => { shards = sumShards(snap); emit() },
+    (err) => { console.error('scan-shard subscription failed', err) },
+  )
+
+  return () => { stopDoc(); stopShards() }
 }
 
 /**

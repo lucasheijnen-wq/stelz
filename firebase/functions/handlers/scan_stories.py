@@ -31,7 +31,7 @@ from typing import Any
 from google.cloud import pubsub_v1
 from google.cloud.firestore import SERVER_TIMESTAMP, Increment
 
-from lib import apify, fs, scan_state, usage
+from lib import apify, fanout, fs, scan_state, usage
 
 log = logging.getLogger(__name__)
 
@@ -447,20 +447,10 @@ def run(brand_id: str, max_handles: int = DEFAULT_MAX_HANDLES, dry_run: bool = F
     images_enqueued = 0
     videos_enqueued = 0
     if not dry_run and publisher:
-        futures = []
-        for post_id, kind, url in new_items:
-            payload = {"brandId": brand_id, "postId": post_id}
-            if kind == "video":
-                payload["videoUrl"] = url
-                futures.append(publisher.publish(video_topic, json.dumps(payload).encode()))
-                videos_enqueued += 1
-            else:
-                payload["imageUrl"] = url
-                futures.append(publisher.publish(image_topic, json.dumps(payload).encode()))
-                images_enqueued += 1
-        if futures:
-            from concurrent.futures import wait as _fwait
-            _fwait(futures, timeout=30)
+        # Counts messages the broker accepted, not publish attempts — see
+        # lib/fanout for the swallowed-future bug all three paths shared.
+        images_enqueued, videos_enqueued, _failed = fanout.publish_detect(
+            publisher, image_topic, video_topic, brand_id, new_items)
         # Same denominator rule as scan_creators: the detect workers count
         # completions from every path, so every path that enqueues must also
         # count — but only when a person is watching this scan session.

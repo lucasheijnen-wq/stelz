@@ -18,7 +18,7 @@ from typing import Any
 from google.cloud import pubsub_v1
 from google.cloud.firestore import SERVER_TIMESTAMP, Increment
 
-from lib import apify, fs, scan_state, usage
+from lib import apify, fanout, fs, scan_state, usage
 
 log = logging.getLogger(__name__)
 
@@ -226,20 +226,13 @@ def run(brand_id: str, max_creators: int = 80, posts_per: int = 15, concurrency:
     # Fan out: images → detect-image, videos → detect-video.
     # Wait on publish futures so messages are flushed before the function exits.
     if not dry_run and publisher:
-        publish_futures = []
-        for post_id, kind, url in new_items:
-            payload = {"brandId": brand_id, "postId": post_id}
-            if kind == "video":
-                payload["videoUrl"] = url
-                publish_futures.append(publisher.publish(video_topic, json.dumps(payload).encode()))
-                videos_enqueued += 1
-            else:
-                payload["imageUrl"] = url
-                publish_futures.append(publisher.publish(image_topic, json.dumps(payload).encode()))
-                images_enqueued += 1
-        if publish_futures:
-            from concurrent.futures import wait as _fwait
-            _fwait(publish_futures, timeout=30)
+        # COUNT WHAT LANDED, NOT WHAT WE TRIED TO SEND — see lib/fanout. The
+        # counters used to be incremented beside the publish() call while the
+        # wait() below inspected no future at all, so every rejected or
+        # unflushed publish still raised detectTasksEnqueued and left the
+        # analysis bar permanently short by messages that never existed.
+        images_enqueued, videos_enqueued, _failed = fanout.publish_detect(
+            publisher, image_topic, video_topic, brand_id, new_items)
         # The scan panel's denominator. Only the hashtag path used to feed
         # detectTasksEnqueued while the detect workers' bump_detect_progress
         # counts completions from EVERY path — so completions overshot the

@@ -86,11 +86,44 @@ from lib import scan_state  # noqa: E402
 scan_state.Increment = FakeIncrement
 
 
+class FakeShardDoc:
+    def __init__(self, store: dict, key: str):
+        self._store, self._key = store, key
+        self.reference = self
+
+    def set(self, patch: dict, merge=False):
+        cur = self._store.setdefault(self._key, {})
+        if not merge:
+            cur.clear()
+        _deep_merge(cur, patch)
+
+    def delete(self):
+        self._store.pop(self._key, None)
+
+
+class FakeShardCol:
+    """The scanShards subcollection — one document per shard."""
+
+    def __init__(self, store: dict):
+        self.store = store
+
+    def document(self, doc_id: str):
+        return FakeShardDoc(self.store, doc_id)
+
+    def stream(self):
+        return [FakeShardDoc(self.store, k) for k in list(self.store)]
+
+
 class FakeBrandDoc:
     """Applies merges, Increments and dotted-path updates like Firestore."""
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, shards: dict | None = None):
         self.data = data
+        self.shards = shards if shards is not None else {}
+
+    def collection(self, name: str):
+        assert name == scan_state.SHARD_COLLECTION, name
+        return FakeShardCol(self.shards)
 
     def set(self, patch: dict, merge=False):
         if not merge:
@@ -122,7 +155,8 @@ def _deep_merge(dst: dict, patch: dict) -> None:
 class ScanStateBase(unittest.TestCase):
     def setUp(self):
         self.brand: dict = {}
-        doc = FakeBrandDoc(self.brand)
+        self.shards: dict = {}
+        doc = FakeBrandDoc(self.brand, self.shards)
         p = mock.patch.object(scan_state, "fs", types.SimpleNamespace(brand_doc=lambda bid: doc))
         p.start()
         self.addCleanup(p.stop)
@@ -169,16 +203,56 @@ class TestStepsMap(ScanStateBase):
 
 
 class TestDetectBump(ScanStateBase):
+    """The detect counters, and why they no longer live on the brand document.
+
+    They were three Increments on /brands/stelz, written once per detect
+    message — ~9.500 per festival scan, from up to 75 containers at once
+    (concurrency=1, max_instances 50 + 25), against a document Firestore
+    sustains roughly one write per second to. bump_detect_progress catches its
+    own failure and only logs it, so every loser of that fight was permanent
+    and invisible. "9290 van 9573" was not 283 dead workers; it was 283 counter
+    writes that lost. And because the same write carried lastActivityAt, the
+    heartbeat then corroborated a story the contention had itself caused.
+    """
+
+    def totals(self) -> dict:
+        out = {"detectionsCompleted": 0, "detectionsHit": 0, "skippedCount": 0}
+        for shard in self.shards.values():
+            for k in out:
+                out[k] += shard.get(k, 0)
+        return out
+
     def test_bump_moves_all_counters_and_the_heartbeat(self):
         scan_state.bump_detect_progress("stelz", hit=True)
         scan_state.bump_detect_progress("stelz", hit=False, skipped=True)
-        scan = self.brand["scan"]
-        self.assertEqual(scan["detectionsCompleted"], 2)
-        self.assertEqual(scan["detectionsHit"], 1)
-        self.assertEqual(scan["skippedCount"], 1)
+        t = self.totals()
+        self.assertEqual(t["detectionsCompleted"], 2)
+        self.assertEqual(t["detectionsHit"], 1)
+        self.assertEqual(t["skippedCount"], 1)
         # Without this the 5-minute stall detector fires during a healthy
-        # detect phase, because nothing else writes lastActivityAt.
-        self.assertEqual(scan["lastActivityAt"], scan_state.SERVER_TIMESTAMP)
+        # detect phase, because nothing else writes lastActivityAt. The client
+        # folds the newest shard timestamp in as the heartbeat.
+        self.assertTrue(any(sh.get("lastActivityAt") == scan_state.SERVER_TIMESTAMP
+                            for sh in self.shards.values()))
+
+    def test_the_brand_document_is_not_touched_at_all(self):
+        # The whole point: 9.500 messages must not contend for one document.
+        scan_state.bump_detect_progress("stelz", hit=True)
+        self.assertEqual(self.brand, {})
+
+    def test_the_load_actually_spreads(self):
+        for _ in range(400):
+            scan_state.bump_detect_progress("stelz", hit=False)
+        self.assertGreater(len(self.shards), 1, "everything landed on one shard")
+        self.assertLessEqual(len(self.shards), scan_state.SHARD_COUNT)
+        self.assertEqual(self.totals()["detectionsCompleted"], 400)
+
+    def test_opening_a_session_clears_the_shards(self):
+        # A leftover shard would inflate the next session's completions.
+        scan_state.bump_detect_progress("stelz", hit=True)
+        self.assertTrue(self.shards)
+        scan_state.session_open("stelz")
+        self.assertEqual(self.shards, {})
 
 
 class TestDetectImageWrapper(unittest.TestCase):

@@ -28,6 +28,40 @@ log = logging.getLogger(__name__)
 # Every step Run scan can execute, in the order the UI lists them.
 STEPS = ("hashtags", "creators", "stories", "profiles", "subcultures", "srs", "sentiment")
 
+# ── The detect counters live in a SHARDED subcollection ──────────────────
+#
+# They used to be three Increments on the brand document itself, written once
+# per detect message. A festival scan is ~9.500 of those, arriving from up to
+# 75 containers at once (detect-image runs concurrency=1, max_instances=50;
+# detect-video 25). Firestore sustains roughly ONE write per second to a single
+# document, and every writer beyond that contends — bump_detect_progress
+# catches its own failure and only logs it, so a lost increment is permanent
+# and invisible.
+#
+# That is what "9290 van 9573" was: not 283 dead workers, but 283 counter
+# writes that lost a fight over one document. The panel then reported it as
+# "de analyse-workers schrijven al uren niets meer", because the same lost
+# write also carried lastActivityAt — the heartbeat corroborated a story it
+# had itself caused.
+#
+# Twenty shards turn one hot document into twenty cool ones. The client sums
+# them and ADDS the flat counter, so a session written by the old code still
+# reads correctly: its shards are empty and the flat value stands.
+SHARD_COLLECTION = "scanShards"
+SHARD_COUNT = 20
+
+
+def _shard_id() -> str:
+    """Pick a shard at random rather than by post id.
+
+    By-id would be stable, which sounds tidier and is worse: an image and its
+    video share a post id, and a carousel's slides differ only in a suffix, so
+    a burst from one post would pile onto one shard — exactly the contention
+    this exists to spread.
+    """
+    import random
+    return f"s{random.randrange(SHARD_COUNT)}"
+
 
 def _sanitize_counts(d: dict[str, Any] | None) -> dict[str, Any]:
     """Handler return dicts go straight to the client, so keep them to
@@ -146,6 +180,12 @@ def session_open(brand_id: str) -> None:
                 "lastActivityAt": SERVER_TIMESTAMP,
             }
         }, merge=True)
+        # The shards are part of the same counters, so they reset with them.
+        # Twenty deletes, and a failure here is not fatal: a leftover shard
+        # inflates the next session's completions, which the client clamps to
+        # the denominator — visibly wrong, but it cannot break a scan.
+        for snap in fs.brand_doc(brand_id).collection(SHARD_COLLECTION).stream():
+            snap.reference.delete()
     except Exception:
         log.exception(f"[{brand_id}] session_open failed")
 
@@ -183,6 +223,22 @@ def session_is_open(brand_id: str) -> bool:
         return False
 
 
+def bump_enqueued(brand_id: str, n: int) -> None:
+    """Add to the analysis denominator. For resume_analysis, which publishes
+    detect work outside the scrapers' own fan-out."""
+    if n <= 0:
+        return
+    try:
+        fs.brand_doc(brand_id).set({
+            "scan": {
+                "detectTasksEnqueued": Increment(n),
+                "lastActivityAt": SERVER_TIMESTAMP,
+            }
+        }, merge=True)
+    except Exception:
+        log.exception(f"[{brand_id}] bump_enqueued failed")
+
+
 def bump_detect_progress(brand_id: str, hit: bool, skipped: bool = False) -> None:
     """One detect message processed. Called from a finally on EVERY terminal
     path, including the expected ones (an expired Instagram CDN URL is a normal
@@ -195,13 +251,11 @@ def bump_detect_progress(brand_id: str, hit: bool, skipped: bool = False) -> Non
     reported a working scan as dead.
     """
     try:
-        fs.brand_doc(brand_id).set({
-            "scan": {
-                "detectionsCompleted": Increment(1),
-                "detectionsHit": Increment(1 if hit else 0),
-                "skippedCount": Increment(1 if skipped else 0),
-                "lastActivityAt": SERVER_TIMESTAMP,
-            }
+        fs.brand_doc(brand_id).collection(SHARD_COLLECTION).document(_shard_id()).set({
+            "detectionsCompleted": Increment(1),
+            "detectionsHit": Increment(1 if hit else 0),
+            "skippedCount": Increment(1 if skipped else 0),
+            "lastActivityAt": SERVER_TIMESTAMP,
         }, merge=True)
     except Exception:
         log.exception(f"[{brand_id}] bump_detect_progress failed")

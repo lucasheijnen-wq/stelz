@@ -52,6 +52,7 @@ from handlers import (
     import_event,
     projects,
     refresh_profiles,
+    resume_analysis,
     seed_subcultures,
     scan_hashtags,
     scan_creators,
@@ -361,6 +362,32 @@ def _run_step(req: https_fn.Request, runner_factory, step: str | None = None,
 
 
 CORS_POST = options.CorsOptions(cors_origins=["*"], cors_methods=["POST", "OPTIONS"])
+
+
+@https_fn.on_request(cors=CORS_POST, memory=options.MemoryOption.MB_512, timeout_sec=300)
+def api_resume_analysis(req: https_fn.Request) -> https_fn.Response:
+    """Re-enqueue detect work for media that never produced a verdict.
+
+    The detect triggers publish with retry unset, which deploys as
+    retry=false, so a worker killed by its container deadline takes its message
+    with it and nothing redelivers. scan_watchdog was removed (see the note at
+    the top of this file), so before this endpoint a stalled fan-out could only
+    be recovered by re-running the whole scrape and paying Apify again.
+
+    It finds the gap in the DATA — posts with no detection document — rather
+    than from scan.detectTasksEnqueued, which counts publish attempts and
+    cannot say which images are missing. See handlers/resume_analysis for what
+    it can and cannot recover: media whose CDN link has expired is gone.
+    """
+    return _run_step(req, lambda brand_id, body: resume_analysis.run(
+        brand_id,
+        since_days=int(body.get("sinceDays") or resume_analysis.DEFAULT_SINCE_DAYS),
+        max_posts=int(body.get("maxPosts") or resume_analysis.DEFAULT_MAX_POSTS),
+        dry_run=bool(body.get("dryRun")),
+    ))
+    # Deliberately NOT a step: STEP_ORDER in the web client decides which keys
+    # render, so a step nobody displays would write a row to Firestore that no
+    # panel ever shows. A resume is a repair, not a stage of a scan.
 
 
 @https_fn.on_request(cors=CORS_POST, memory=options.MemoryOption.MB_512, timeout_sec=60)

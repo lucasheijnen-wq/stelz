@@ -217,24 +217,75 @@ class TestBudgetTrim(PublishTagsBase):
 
 
 class TestMarkTagDone(PublishTagsBase):
+    """Closing the hashtag phase — the write that could half-land.
+
+    It used to be two writes: scan.finishedAt first, then a separate
+    step_finished. Both failures are swallowed, so a transient Firestore error
+    or the 540s container deadline landing between them left steps.hashtags on
+    'running' with finishedAt already set. And the guard was `not finishedAt`
+    alone, which made that PERMANENT — every later worker and every Pub/Sub
+    redelivery found finishedAt set and skipped the close, and scan_watchdog
+    was removed (main.py:70), so nothing repaired it server-side. The panel
+    then pulsed for six hours before the client relabelled the row red.
+    """
+
+    def closes(self):
+        """Every write that closes the session, whichever API it used."""
+        return [e for e in self.events
+                if (e[0] == "update" and e[1].get("scan.endReason"))
+                or (e[0] == "set" and (e[1].get("scan") or {}).get("endReason"))]
+
     def test_last_worker_stamps_finished_and_closes_the_step(self):
         self.brand.data = {"scan": {"hashtagDone": 2, "hashtagQueued": 2,
                                     "finishedAt": None, "postsWritten": 7,
                                     "detectTasksEnqueued": 5}}
         scan_hashtags._mark_tag_done("stelz", posts_written=3, detect_tasks=2)
-        finish = [e for e in self.events
-                  if e[0] == "set" and (e[1].get("scan") or {}).get("endReason")]
+        finish = self.closes()
         self.assertEqual(len(finish), 1)
-        self.assertEqual(finish[0][1]["scan"]["endReason"], "tags_complete")
+        self.assertEqual(finish[0][1]["scan.endReason"], "tags_complete")
         # THE line that was dead for four commits: the step actually closes.
-        self.assertEqual([s for s, _ in self.steps_closed], ["hashtags"])
+        self.assertEqual(finish[0][1]["scan.steps.hashtags.state"], "done")
+
+    def test_the_close_is_one_atomic_write(self):
+        """A Firestore document write is atomic; two are not. Splitting these
+        is what let the step hang 'running' under a finished session."""
+        self.brand.data = {"scan": {"hashtagDone": 1, "hashtagQueued": 1,
+                                    "finishedAt": None}}
+        scan_hashtags._mark_tag_done("stelz")
+        finish = self.closes()
+        self.assertEqual(len(finish), 1, "the close must not be split in two")
+        payload = finish[0][1]
+        self.assertIn("scan.finishedAt", payload)
+        self.assertIn("scan.steps.hashtags.state", payload)
+
+    def test_a_step_left_running_is_repaired_by_a_later_worker(self):
+        """The unrecoverable state, made recoverable. finishedAt is already
+        set from a close whose second write was lost; a redelivered or later
+        worker must finish the job rather than skip it forever."""
+        self.brand.data = {"scan": {
+            "hashtagDone": 2, "hashtagQueued": 2, "finishedAt": "eerder",
+            "steps": {"hashtags": {"state": "running"}},
+        }}
+        scan_hashtags._mark_tag_done("stelz")
+        finish = self.closes()
+        self.assertEqual(len(finish), 1)
+        self.assertEqual(finish[0][1]["scan.steps.hashtags.state"], "done")
+
+    def test_a_finished_session_is_not_reclosed(self):
+        """Only the broken state is repaired. Re-closing a healthy finished
+        session would move finishedAt forward on every stray redelivery."""
+        self.brand.data = {"scan": {
+            "hashtagDone": 2, "hashtagQueued": 2, "finishedAt": "eerder",
+            "steps": {"hashtags": {"state": "done"}},
+        }}
+        scan_hashtags._mark_tag_done("stelz")
+        self.assertEqual(self.closes(), [])
 
     def test_not_last_worker_neither_stamps_nor_closes(self):
         self.brand.data = {"scan": {"hashtagDone": 1, "hashtagQueued": 2,
                                     "finishedAt": None}}
         scan_hashtags._mark_tag_done("stelz")
-        self.assertFalse([e for e in self.events
-                          if e[0] == "set" and (e[1].get("scan") or {}).get("endReason")])
+        self.assertEqual(self.closes(), [])
         self.assertEqual(self.steps_closed, [])
 
 

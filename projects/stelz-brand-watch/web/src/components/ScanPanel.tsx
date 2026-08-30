@@ -21,7 +21,8 @@ import { useState } from 'react'
 import { Card } from './ui'
 import { useNow } from '../lib/useNow'
 import { analysisProgress, overallProgress, scanPhase, stepViews, type StepView } from '../lib/scanProgress'
-import type { ScanState, ScanStepKey } from '../lib/firestore'
+import { fbResumeAnalysis, type ScanState, type ScanStepKey } from '../lib/firestore'
+import { useMembership } from '../lib/membershipContext'
 
 export function ScanPanel({
   scan,
@@ -76,16 +77,21 @@ export function ScanPanel({
       {/* THE LINE. Keyed on its own text so React remounts it when the text
           changes, which is what restarts the fade — a plain <span> whose
           content changes would swap the words with no transition at all. */}
-      <div className="mt-2 h-4 overflow-hidden">
-        <span
-          key={overall.label}
-          className={`block text-[12px] leading-4 truncate animate-[scanline_400ms_ease-out] ${toneClass}`}
-        >
-          {overall.busy && (
-            <span className="inline-block w-1 h-1 mb-0.5 mr-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-          )}
-          {overall.label}
-        </span>
+      <div className="mt-2 flex items-baseline gap-3">
+        <div className="min-w-0 flex-1 h-4 overflow-hidden">
+          <span
+            key={overall.label}
+            className={`block text-[12px] leading-4 truncate animate-[scanline_400ms_ease-out] ${toneClass}`}
+          >
+            {overall.busy && (
+              <span className="inline-block w-1 h-1 mb-0.5 mr-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+            )}
+            {overall.label}
+          </span>
+        </div>
+        {/* The repair, offered where the damage is visible. Only when work was
+            actually lost — a running scan does not need resuming. */}
+        {overall.tone === 'bad' && <ResumeButton />}
       </div>
 
       {open && (
@@ -96,6 +102,66 @@ export function ScanPanel({
         </ul>
       )}
     </Card>
+  )
+}
+
+/**
+ * "Hervatten" — re-analyse media that never produced a verdict.
+ *
+ * A stalled fan-out could previously only be recovered by re-running the whole
+ * scrape, which pays Apify a second time for posts already on disk. This pays
+ * nothing to Apify: the media is harvested, only the analysis is missing. The
+ * server finds the gap in the data (posts with no detection document) rather
+ * than from the counter, which counts publish attempts and cannot name a file.
+ */
+function ResumeButton() {
+  const { canWrite } = useMembership()
+  const [state, setState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle')
+  const [note, setNote] = useState<string | null>(null)
+  if (!canWrite) return null
+
+  const go = async () => {
+    setState('busy')
+    setNote(null)
+    try {
+      const out = await fbResumeAnalysis() as {
+        posts_without_analysis?: number; images_enqueued?: number
+        videos_enqueued?: number; skipped?: string
+      }
+      if (out.skipped) {
+        setState('error')
+        setNote(out.skipped === 'budget_exhausted'
+          ? 'dagbudget op'
+          : `overgeslagen: ${out.skipped}`)
+        return
+      }
+      const n = (out.images_enqueued ?? 0) + (out.videos_enqueued ?? 0)
+      setState('done')
+      // Zero is a real answer and worth saying: it means nothing was lost that
+      // this can reach, which is different from "it worked".
+      setNote(n > 0
+        ? `${n} beelden opnieuw aangeboden`
+        : 'niets te hervatten — alles heeft al een oordeel')
+    } catch (e) {
+      setState('error')
+      setNote((e as Error).message)
+    }
+  }
+
+  if (state === 'done' || (state === 'error' && note)) {
+    return <span className="text-[11px] text-[var(--color-ink-subtle)] shrink-0">{note}</span>
+  }
+  return (
+    <button
+      onClick={() => { void go() }}
+      disabled={state === 'busy'}
+      className="text-[11px] underline text-[var(--color-ink-muted)] shrink-0 disabled:opacity-50"
+      title={'Biedt beelden zonder oordeel opnieuw aan de analyse aan. '
+        + 'Kost geen Apify-tegoed — het materiaal is al binnengehaald. '
+        + 'Beelden waarvan de CDN-link verlopen is zijn niet meer op te halen.'}
+    >
+      {state === 'busy' ? 'bezig…' : 'hervatten'}
+    </button>
   )
 }
 
