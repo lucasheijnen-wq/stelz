@@ -19,6 +19,20 @@
   --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
 }
 
+/* The scan panel's status line, which is remounted whenever its text changes
+   (ScanPanel keys it on the text). Rising rather than sliding sideways: the
+   line sits under a progress bar and a horizontal move reads as the bar
+   moving. Short and eased, so a scan that switches step every few seconds
+   does not feel busy. */
+@keyframes scanline {
+  from { opacity: 0; transform: translateY(0.35rem); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-\[scanline_400ms_ease-out\] { animation: none; }
+}
+
 /* Stelz display style — bold condensed uppercase, like drinkstelz.com headings */
 .stelz-display {
   font-family: var(--font-display);

@@ -216,6 +216,108 @@ export function stepViews(
   })
 }
 
+/**
+ * How much of the whole scan is behind us, and the ONE line describing it.
+ *
+ * The panel used to render nine rows, each with a label, a count and
+ * sometimes an error — a wall of text for a thing whose only real question is
+ * "is it still going, and how far". This collapses that into a bar and a
+ * sentence; the rows still exist behind a toggle, because a scan that failed
+ * has to be able to say which step failed.
+ *
+ * WEIGHTING. Steps are not equal. `sentiment` and `subcultures` are seconds of
+ * Firestore compute; the detect fan-out is the overwhelming majority of a
+ * scan's wall-clock time, and a bar that gave it one ninth would sprint to 78%
+ * and then appear frozen for the rest of the run. So analysis carries four
+ * units against one for everything else — a judgement about proportion, not a
+ * measurement, but far closer than equal weighting.
+ *
+ * A terminal step counts as travelled whether it succeeded, was skipped or
+ * failed: the bar reports how much of the scan is BEHIND us, and a failed step
+ * is not coming back. Whether that is bad news is the line's job, not the
+ * bar's.
+ */
+export const ANALYSIS_WEIGHT = 4
+
+export type Overall = {
+  /** 0–100, monotonic within a session. */
+  pct: number
+  /** The single line under the bar. Already includes counts where they matter. */
+  label: string
+  tone: 'accent' | 'good' | 'bad'
+  /** Work is genuinely in flight — the line animates and the bar stripes. */
+  busy: boolean
+}
+
+export function overallProgress(
+  s: ScanState | null,
+  clientErrors: Partial<Record<ScanStepKey, string>> = {},
+  now = Date.now(),
+): Overall | null {
+  const phase = scanPhase(s, now)
+  if (phase === 'idle') return null
+
+  const views = stepViews(s, clientErrors, now)
+  const weightOf = (v: StepView) => (v.key === ANALYSIS_KEY ? ANALYSIS_WEIGHT : 1)
+
+  let travelled = 0
+  let total = 0
+  for (const v of views) {
+    const w = weightOf(v)
+    total += w
+    if (v.state === 'done' || v.state === 'skipped' || v.state === 'error') travelled += w
+    else if (v.state === 'running' && v.key === ANALYSIS_KEY) {
+      // The only step that can report its own fraction.
+      const a = analysisProgress(s, now)
+      if (a) travelled += w * (a.pct / 100)
+    }
+  }
+  const pct = total > 0 ? Math.round((travelled / total) * 100) : 0
+
+  // The line. First a running step, because that is what "now" means; then
+  // failure, because a stopped scan owes the reader a reason; then done.
+  const running = views.find((v) => v.state === 'running')
+  if (running) {
+    return {
+      pct,
+      label: running.detail ? `${running.label} · ${running.detail}` : running.label,
+      tone: 'accent',
+      busy: true,
+    }
+  }
+
+  const failed = views.find((v) => v.state === 'error')
+  if (failed) {
+    return {
+      pct,
+      label: failed.error ? `${failed.label} — ${failed.error}` : `${failed.label} is niet afgemaakt`,
+      tone: 'bad',
+      busy: false,
+    }
+  }
+
+  if (phase === 'stalled') {
+    return { pct, label: 'Scan reageert niet meer', tone: 'bad', busy: false }
+  }
+
+  if (phase === 'done') {
+    const hits = s?.detectionsHit ?? 0
+    return {
+      pct: 100,
+      label: hits > 0 ? `Scan afgerond · ${hits} treffers` : 'Scan afgerond',
+      tone: 'good',
+      busy: false,
+    }
+  }
+
+  // Nothing running, nothing failed, and not finished either: between steps,
+  // or waiting for a fan-out that has not reported yet. This branch used to
+  // return a hardcoded 100 with "Scan afgerond", so a scan that had merely
+  // gone quiet for a moment announced itself as complete — and the bar could
+  // never come back down from 100 afterwards.
+  return { pct, label: 'Scan bezig', tone: 'accent', busy: true }
+}
+
 /** A handler's return dict, rendered as one short line. */
 function summarizeCounts(counts: Record<string, number> | undefined): string | null {
   if (!counts) return null

@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { analysisProgress, scanHeadline, scanIsStale, scanPhase, stepViews, STEP_ORDER } from './scanProgress'
+import {
+  analysisProgress, overallProgress, scanHeadline, scanIsStale, scanPhase, stepViews,
+  ANALYSIS_WEIGHT, STEP_ORDER,
+} from './scanProgress'
 import type { ScanState } from './firestore'
 
 const NOW = Date.parse('2026-08-20T12:00:00Z')
+const NOW_ISO = '2026-08-20T11:58:00Z'
 
 function state(over: Partial<ScanState> = {}): ScanState {
   return {
@@ -243,5 +247,125 @@ describe('een step die eeuwig running zegt', () => {
     // doorwerkt is normaal, zolang het geen uren stilte is.
     const s = state({ finishedAt: '2026-08-20T11:58:00Z', steps: runningStep })
     expect(scanPhase(s, NOW)).toBe('scraping')
+  })
+})
+
+describe('overallProgress — the bar and the one line', () => {
+  const step = (state: 'running' | 'done' | 'error' | 'skipped', over = {}) => ({
+    state, startedAt: null, finishedAt: null, error: null, counts: {}, ...over,
+  })
+
+  it('is null before anything ran, so the panel renders nothing', () => {
+    expect(overallProgress(null, {}, NOW)).toBeNull()
+    expect(overallProgress(state({ startedAt: null }), {}, NOW)).toBeNull()
+  })
+
+  it('names the running step, and only that step', () => {
+    const s = state({ steps: { creators: step('running') } })
+    const o = overallProgress(s, {}, NOW)!
+    expect(o.label).toBe('Creators scrapen')
+    expect(o.busy).toBe(true)
+    expect(o.tone).toBe('accent')
+  })
+
+  it('puts the analysis counts on the line, because that is the wait', () => {
+    const s = state({ detectTasksEnqueued: 9573, detectionsCompleted: 9290 })
+    const o = overallProgress(s, {}, NOW)!
+    expect(o.label).toContain('Beelden analyseren')
+    expect(o.label).toContain('9290 van 9573')
+  })
+
+  it('weights analysis above the trivial steps', () => {
+    // Equal weighting would send the bar to 78% on the cheap steps and then
+    // appear frozen through the part that actually takes the time.
+    expect(ANALYSIS_WEIGHT).toBeGreaterThan(1)
+    const done = Object.fromEntries(
+      STEP_ORDER.filter((x) => x.key !== 'analysis').map((x) => [x.key, step('done')]))
+    // Everything except analysis finished; analysis has not started.
+    const s = state({ steps: done })
+    const o = overallProgress(s, {}, NOW)!
+    expect(o.pct).toBeLessThan(80)
+  })
+
+  it('counts a failed step as travelled — it is not coming back', () => {
+    // The bar reports how much is BEHIND us. Whether that is good news is the
+    // line's job; a bar that stalls on failure just looks broken.
+    const all = Object.fromEntries(
+      STEP_ORDER.filter((x) => x.key !== 'analysis').map((x) => [x.key, step('done')]))
+    all.hashtags = step('error', { error: 'boom' })
+    const s = state({ steps: all, detectTasksEnqueued: 10, detectionsCompleted: 10 })
+    expect(overallProgress(s, {}, NOW)!.pct).toBe(100)
+  })
+
+  it('reports the failure on the line, not just a colour', () => {
+    const s = state({
+      steps: { hashtags: step('error', { error: 'niet afgemaakt' }) },
+      finishedAt: '2026-08-20T11:58:00Z',
+    })
+    const o = overallProgress(s, {}, NOW)!
+    expect(o.tone).toBe('bad')
+    expect(o.label).toContain('Hashtags scrapen')
+    expect(o.label).toContain('niet afgemaakt')
+    expect(o.busy).toBe(false)
+  })
+
+  it('prefers a running step over a failed one', () => {
+    // A failed enrichment step must not replace "still scraping" on the line:
+    // the reader needs to know work is in flight before they know it is
+    // imperfect.
+    const s = state({
+      steps: { hashtags: step('error', { error: 'boom' }), creators: step('running') },
+    })
+    expect(overallProgress(s, {}, NOW)!.label).toBe('Creators scrapen')
+  })
+
+  it('does not call a quiet moment "afgerond"', () => {
+    // Regression: the final branch returned a hardcoded 100 with "Scan
+    // afgerond" for ANY state that was not running, failed or stalled —
+    // including a scan mid-flight between two steps. It announced completion
+    // early, and the bar could never come back down afterwards.
+    const done = Object.fromEntries(
+      STEP_ORDER.filter((x) => x.key !== 'analysis').map((x) => [x.key, step('done')]))
+    const s = state({ steps: done, finishedAt: null })
+    const o = overallProgress(s, {}, NOW)!
+    expect(o.label).not.toContain('afgerond')
+    expect(o.pct).toBeLessThan(100)
+    expect(o.busy).toBe(true)
+  })
+
+  it('ends at 100 with the hit count', () => {
+    const all = Object.fromEntries(STEP_ORDER.map((x) => [x.key, step('done')]))
+    const s = state({
+      steps: all, finishedAt: '2026-08-20T11:58:00Z',
+      detectTasksEnqueued: 40, detectionsCompleted: 40, detectionsHit: 7,
+    })
+    const o = overallProgress(s, {}, NOW)!
+    expect(o.pct).toBe(100)
+    expect(o.tone).toBe('good')
+    expect(o.label).toContain('7 treffers')
+  })
+
+  it('never exceeds 100 or drops below 0', () => {
+    const all = Object.fromEntries(STEP_ORDER.map((x) => [x.key, step('done')]))
+    const s = state({
+      steps: all, detectTasksEnqueued: 10, detectionsCompleted: 999,
+    })
+    const o = overallProgress(s, {}, NOW)!
+    expect(o.pct).toBeGreaterThanOrEqual(0)
+    expect(o.pct).toBeLessThanOrEqual(100)
+  })
+
+  it('is one line — never a paragraph', () => {
+    // The whole point of the redesign. A label with a newline in it would wrap
+    // the panel open again.
+    const cases = [
+      state({ steps: { creators: step('running') } }),
+      state({ detectTasksEnqueued: 100, detectionsCompleted: 3 }),
+      state({ steps: { hashtags: step('error', { error: 'x'.repeat(200) }) }, finishedAt: NOW_ISO }),
+    ]
+    for (const s of cases) {
+      const o = overallProgress(s, {}, NOW)
+      if (o) expect(o.label).not.toContain('\n')
+    }
   })
 })
